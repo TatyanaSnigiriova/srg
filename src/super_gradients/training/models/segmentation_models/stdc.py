@@ -16,9 +16,9 @@ from super_gradients.training.utils import get_param, HpmStruct
 from super_gradients.modules import ConvBNReLU
 from super_gradients.training.models.segmentation_models.common import SegmentationHead
 
-
 # default STDC argument as paper.
-STDC_SEG_DEFAULT_ARGS = {"context_fuse_channels": 128, "ffm_channels": 256, "aux_head_channels": 64, "detail_head_channels": 64}
+STDC_SEG_DEFAULT_ARGS = {"context_fuse_channels": 128, "ffm_channels": 256, "aux_head_channels": 64,
+                         "detail_head_channels": 64}
 
 
 class STDCBlock(nn.Module):
@@ -46,10 +46,12 @@ class STDCBlock(nn.Module):
             self.skip_step1 = nn.AvgPool2d(kernel_size=3, stride=2, padding=1)
         elif stdc_downsample_mode == "dw_conv":
             self.skip_step1 = ConvBNReLU(
-                out_channels // 2, out_channels // 2, kernel_size=3, stride=2, padding=1, bias=False, groups=out_channels // 2, use_activation=False
+                out_channels // 2, out_channels // 2, kernel_size=3, stride=2, padding=1, bias=False,
+                groups=out_channels // 2, use_activation=False
             )
         else:
-            raise ValueError(f"stdc_downsample mode is not supported: found {stdc_downsample_mode}," f" must be in [avg_pool, dw_conv]")
+            raise ValueError(
+                f"stdc_downsample mode is not supported: found {stdc_downsample_mode}," f" must be in [avg_pool, dw_conv]")
 
         in_channels = out_channels // 2
         mid_channels = in_channels
@@ -65,7 +67,8 @@ class STDCBlock(nn.Module):
         if stride == 2:
             self.conv_list[1] = nn.Sequential(
                 ConvBNReLU(
-                    out_channels // 2, out_channels // 2, kernel_size=3, stride=2, padding=1, groups=out_channels // 2, use_activation=False, bias=False
+                    out_channels // 2, out_channels // 2, kernel_size=3, stride=2, padding=1, groups=out_channels // 2,
+                    use_activation=False, bias=False
                 ),
                 self.conv_list[1],
             )
@@ -104,14 +107,14 @@ class AbstractSTDCBackbone(nn.Module, ABC):
 
 class STDCBackbone(AbstractSTDCBackbone):
     def __init__(
-        self,
-        block_types: list,
-        ch_widths: list,
-        num_blocks: list,
-        stdc_steps: int = 4,
-        stdc_downsample_mode: str = "avg_pool",
-        in_channels: int = 3,
-        out_down_ratios: Union[tuple, list] = (32,),
+            self,
+            block_types: list,
+            ch_widths: list,
+            num_blocks: list,
+            stdc_steps: int = 4,
+            stdc_downsample_mode: str = "avg_pool",
+            in_channels: int = 3,
+            out_down_ratios: Union[tuple, list] = (32,),
     ):
         """
         :param block_types: list of block type for each stage, supported `conv` for ConvBNRelu with 3x3 kernel.
@@ -151,7 +154,8 @@ class STDCBackbone(AbstractSTDCBackbone):
             in_channels = width
             down_ratio *= 2
 
-    def _make_stage(self, in_channels: int, out_channels: int, block_type: str, num_blocks: int, stdc_downsample_mode: str, stdc_steps: int = 4):
+    def _make_stage(self, in_channels: int, out_channels: int, block_type: str, num_blocks: int,
+                    stdc_downsample_mode: str, stdc_steps: int = 4):
         """
         :param in_channels: input channels of stage.
         :param out_channels: output channels of stage.
@@ -239,7 +243,8 @@ class STDCClassificationBase(SgModule):
 class STDCClassification(STDCClassificationBase):
     def __init__(self, arch_params: HpmStruct):
         super().__init__(
-            backbone=get_param(arch_params, "backbone"), num_classes=get_param(arch_params, "num_classes"), dropout=get_param(arch_params, "dropout", 0.2)
+            backbone=get_param(arch_params, "backbone"), num_classes=get_param(arch_params, "num_classes"),
+            dropout=get_param(arch_params, "dropout", 0.2)
         )
 
 
@@ -252,7 +257,8 @@ class AttentionRefinementModule(nn.Module):
         super(AttentionRefinementModule, self).__init__()
         self.conv_first = ConvBNReLU(in_channels, out_channels, kernel_size=3, padding=1, bias=False)
         self.attention_block = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1), ConvBNReLU(out_channels, out_channels, kernel_size=1, bias=False, use_activation=False), nn.Sigmoid()
+            nn.AdaptiveAvgPool2d(1),
+            ConvBNReLU(out_channels, out_channels, kernel_size=1, bias=False, use_activation=False), nn.Sigmoid()
         )
 
     def forward(self, x):
@@ -272,11 +278,13 @@ class FeatureFusionModule(nn.Module):
 
     def __init__(self, spatial_channels: int, context_channels: int, out_channels: int):
         super(FeatureFusionModule, self).__init__()
-        self.pw_conv = ConvBNReLU(spatial_channels + context_channels, out_channels, kernel_size=1, stride=1, bias=False)
+        self.pw_conv = ConvBNReLU(spatial_channels + context_channels, out_channels, kernel_size=1, stride=1,
+                                  bias=False)
         # TODO - used without bias in convolutions by mistake, try to reproduce with bias=True
         self.attention_block = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
-            ConvBNReLU(in_channels=out_channels, out_channels=out_channels // 4, kernel_size=1, use_normalization=False, bias=False),
+            ConvBNReLU(in_channels=out_channels, out_channels=out_channels // 4, kernel_size=1, use_normalization=False,
+                       bias=False),
             nn.Conv2d(in_channels=out_channels // 4, out_channels=out_channels, kernel_size=1, bias=False),
             nn.Sigmoid(),
         )
@@ -300,7 +308,9 @@ class ContextEmbeddingOnline(nn.Module):
         super(ContextEmbeddingOnline, self).__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
-        self.context_embedding = nn.Sequential(nn.AdaptiveAvgPool2d(1), ConvBNReLU(in_channels, out_channels, kernel_size=1, stride=1, bias=False))
+        self.context_embedding = nn.Sequential(nn.AdaptiveAvgPool2d(1),
+                                               ConvBNReLU(in_channels, out_channels, kernel_size=1, stride=1,
+                                                          bias=False))
 
     def forward(self, x):
         out_height, out_width = x.size()[2:]
@@ -320,7 +330,8 @@ class ContextEmbeddingFixedSize(ContextEmbeddingOnline):
 
     @classmethod
     def from_context_embedding_online(cls, ce_online: ContextEmbeddingOnline, upsample_size: Union[list, tuple]):
-        context = ContextEmbeddingFixedSize(in_channels=ce_online.in_channels, out_channels=ce_online.out_channels, upsample_size=upsample_size)
+        context = ContextEmbeddingFixedSize(in_channels=ce_online.in_channels, out_channels=ce_online.out_channels,
+                                            upsample_size=upsample_size)
         # keep training mode state as original module
         context.train(ce_online.training)
         context.load_state_dict(ce_online.state_dict())
@@ -354,12 +365,14 @@ class ContextPath(nn.Module):
 
         self.arm32 = AttentionRefinementModule(channels32, fuse_channels)
         self.upsample32 = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode="nearest"), ConvBNReLU(fuse_channels, fuse_channels, kernel_size=3, padding=1, stride=1, bias=False)
+            nn.Upsample(scale_factor=2, mode="nearest"),
+            ConvBNReLU(fuse_channels, fuse_channels, kernel_size=3, padding=1, stride=1, bias=False)
         )
 
         self.arm16 = AttentionRefinementModule(channels16, fuse_channels)
         self.upsample16 = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode="nearest"), ConvBNReLU(fuse_channels, fuse_channels, kernel_size=3, padding=1, stride=1, bias=False)
+            nn.Upsample(scale_factor=2, mode="nearest"),
+            ConvBNReLU(fuse_channels, fuse_channels, kernel_size=3, padding=1, stride=1, bias=False)
         )
 
     def forward(self, x):
@@ -396,15 +409,15 @@ class STDCSegmentationBase(SgModule):
 
     @resolve_param("backbone", BaseFactory({"STDCBackbone": STDCBackbone}))
     def __init__(
-        self,
-        backbone: AbstractSTDCBackbone,
-        num_classes: int,
-        context_fuse_channels: int,
-        ffm_channels: int,
-        aux_head_channels: int,
-        detail_head_channels: int,
-        use_aux_heads: bool,
-        dropout: float,
+            self,
+            backbone: AbstractSTDCBackbone,
+            num_classes: int,
+            context_fuse_channels: int,
+            ffm_channels: int,
+            aux_head_channels: int,
+            detail_head_channels: int,
+            use_aux_heads: bool,
+            dropout: float,
     ):
         super(STDCSegmentationBase, self).__init__()
         backbone.validate_backbone()
@@ -414,10 +427,12 @@ class STDCSegmentationBase(SgModule):
 
         stage3_s8_channels, stage4_s16_channels, stage5_s32_channels = backbone.get_backbone_output_number_of_channels()
 
-        self.ffm = FeatureFusionModule(spatial_channels=stage3_s8_channels, context_channels=context_fuse_channels, out_channels=ffm_channels)
+        self.ffm = FeatureFusionModule(spatial_channels=stage3_s8_channels, context_channels=context_fuse_channels,
+                                       out_channels=ffm_channels)
         # Main segmentation head
         self.segmentation_head = nn.Sequential(
-            SegmentationHead(ffm_channels, ffm_channels, num_classes, dropout=dropout), nn.Upsample(scale_factor=8, mode="bilinear", align_corners=True)
+            SegmentationHead(ffm_channels, ffm_channels, num_classes, dropout=dropout),
+            nn.Upsample(scale_factor=8, mode="bilinear", align_corners=True)
         )
 
         if self._use_aux_heads:
@@ -432,7 +447,8 @@ class STDCSegmentationBase(SgModule):
             )
             # Detail head
             self.detail_head8 = nn.Sequential(
-                SegmentationHead(stage3_s8_channels, detail_head_channels, 1, dropout=dropout), nn.Upsample(scale_factor=8, mode="bilinear", align_corners=True)
+                SegmentationHead(stage3_s8_channels, detail_head_channels, 1, dropout=dropout),
+                nn.Upsample(scale_factor=8, mode="bilinear", align_corners=True)
             )
 
         self.init_params()
@@ -447,7 +463,8 @@ class STDCSegmentationBase(SgModule):
         self.use_aux_heads = False
 
         context_embedding_up_size = (input_size[-2] // 32, input_size[-1] // 32)
-        self.cp.context_embedding = ContextEmbeddingFixedSize.from_context_embedding_online(self.cp.context_embedding, context_embedding_up_size)
+        self.cp.context_embedding = ContextEmbeddingFixedSize.from_context_embedding_online(self.cp.context_embedding,
+                                                                                            context_embedding_up_size)
 
     def _remove_auxiliary_and_detail_heads(self):
         attributes_to_delete = ["aux_head_s16", "aux_head_s32", "detail_head8"]
@@ -468,7 +485,8 @@ class STDCSegmentationBase(SgModule):
             aux and detail heads outside init method is not allowed, and the module should be recreated.
         """
         if use_aux is True and self._use_aux_heads is False:
-            raise ValueError("Cant turn use_aux_heads from False to True, you should initiate the module again with" " `use_aux_heads=True`")
+            raise ValueError(
+                "Cant turn use_aux_heads from False to True, you should initiate the module again with" " `use_aux_heads=True`")
         if not use_aux:
             self._remove_auxiliary_and_detail_heads()
         self.cp.use_aux_heads = use_aux
@@ -523,9 +541,11 @@ class STDCSegmentationBase(SgModule):
             aux_head_channels = self.aux_head_s16[0].seg_head[-1].in_channels
             detail_head_channels = self.detail_head8[0].seg_head[-1].in_channels
 
-            self.aux_head_s16[0] = SegmentationHead(stage4_s16_channels, aux_head_channels, new_num_classes, dropout=dropout)
+            self.aux_head_s16[0] = SegmentationHead(stage4_s16_channels, aux_head_channels, new_num_classes,
+                                                    dropout=dropout)
 
-            self.aux_head_s32[0] = SegmentationHead(stage5_s32_channels, aux_head_channels, new_num_classes, dropout=dropout)
+            self.aux_head_s32[0] = SegmentationHead(stage5_s32_channels, aux_head_channels, new_num_classes,
+                                                    dropout=dropout)
             # Detail head
             self.detail_head8[0] = SegmentationHead(stage3_s8_channels, detail_head_channels, 1, dropout=dropout)
 
@@ -536,7 +556,8 @@ class STDCSegmentationBase(SgModule):
             - Add extra Detail loss params to optimizer.
         """
 
-        extra_train_params = training_params.loss.get_train_named_params() if hasattr(training_params.loss, "get_train_named_params") else None
+        extra_train_params = training_params.loss.get_train_named_params() if hasattr(training_params.loss,
+                                                                                      "get_train_named_params") else None
         multiply_head_lr = get_param(training_params, "multiply_head_lr", 1)
 
         multiply_lr_params, no_multiply_params = self._separate_lr_multiply_params()
@@ -546,11 +567,13 @@ class STDCSegmentationBase(SgModule):
         ]
 
         if extra_train_params is not None:
-            param_groups.append({"named_params": extra_train_params, "lr": lr, "weight_decay": 0.0, "name": "detail_params"})
+            param_groups.append(
+                {"named_params": extra_train_params, "lr": lr, "weight_decay": 0.0, "name": "detail_params"})
 
         return param_groups
 
-    def update_param_groups(self, param_groups: list, lr: float, epoch: int, iter: int, training_params: HpmStruct, total_batch: int) -> list:
+    def update_param_groups(self, param_groups: list, lr: float, epoch: int, iter: int, training_params: HpmStruct,
+                            total_batch: int) -> list:
         multiply_head_lr = get_param(training_params, "multiply_head_lr", 1)
         for param_group in param_groups:
             param_group["lr"] = lr

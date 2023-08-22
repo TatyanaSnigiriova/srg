@@ -24,20 +24,20 @@ logger = get_logger(__name__)
 
 class BaseSGLogger(AbstractSGLogger):
     def __init__(
-        self,
-        project_name: str,
-        experiment_name: str,
-        storage_location: str,
-        resumed: bool,
-        training_params: TrainingParams,
-        checkpoints_dir_path: str,
-        tb_files_user_prompt: bool = False,
-        launch_tensorboard: bool = False,
-        tensorboard_port: int = None,
-        save_checkpoints_remote: bool = True,
-        save_tensorboard_remote: bool = True,
-        save_logs_remote: bool = True,
-        monitor_system: bool = True,
+            self,
+            project_name: str,
+            experiment_name: str,
+            storage_location: str,
+            resumed: bool,
+            training_params: TrainingParams,
+            checkpoints_dir_path: str,
+            tb_files_user_prompt: bool = False,
+            launch_tensorboard: bool = False,
+            tensorboard_port: int = None,
+            save_checkpoints_remote: bool = True,
+            save_tensorboard_remote: bool = True,
+            save_logs_remote: bool = True,
+            monitor_system: bool = True,
     ):
         """
 
@@ -69,11 +69,17 @@ class BaseSGLogger(AbstractSGLogger):
         else:
             self.remote_storage_available = False
             if save_checkpoints_remote:
-                logger.error("save_checkpoints_remote == True but storage_location is not s3 path. Files will not be saved remotely")
+                logger.error(
+                    "save_checkpoints_remote == True but storage_location is not s3 path. Files will not be saved remotely"
+                )
             if save_tensorboard_remote:
-                logger.error("save_tensorboard_remote == True but storage_location is not s3 path. Files will not be saved remotely")
+                logger.error(
+                    "save_tensorboard_remote == True but storage_location is not s3 path. Files will not be saved remotely"
+                )
             if save_logs_remote:
-                logger.error("save_logs_remote == True but storage_location is not s3 path. Files will not be saved remotely")
+                logger.error(
+                    "save_logs_remote == True but storage_location is not s3 path. Files will not be saved remotely"
+                )
 
             self.save_checkpoints_remote = False
             self.save_tensorboard_remote = False
@@ -87,7 +93,9 @@ class BaseSGLogger(AbstractSGLogger):
         self._init_tensorboard(resumed, tb_files_user_prompt)
         self._init_log_file()
 
-        self.model_checkpoints_data_interface = ADNNModelRepositoryDataInterfaces(data_connection_location=self.storage_location)
+        self.model_checkpoints_data_interface = ADNNModelRepositoryDataInterfaces(
+            data_connection_location=self.storage_location
+        )
 
         if launch_tensorboard:
             self._launch_tensorboard(port=tensorboard_port)
@@ -136,12 +144,21 @@ class BaseSGLogger(AbstractSGLogger):
         log_lines.append(json.dumps(config, indent=4, default=str))
         log_lines.append("------- config parameters end --------")
 
-        self.tensorboard_writer.add_text(tag, json.dumps(config, indent=4, default=str).replace(" ", "&nbsp;").replace("\n", "  \n  "))
+        self.tensorboard_writer.add_text(
+            tag,
+            json.dumps(config, indent=4, default=str)\
+                .replace(" ", "&nbsp;")\
+                .replace("\n", "  \n  ")
+        )
         self._write_to_log_file(log_lines)
 
     @multi_process_safe
     def add_scalar(self, tag: str, scalar_value: float, global_step: int = None):
-        self.tensorboard_writer.add_scalar(tag=tag.lower().replace(" ", "_"), scalar_value=scalar_value, global_step=global_step)
+        self.tensorboard_writer.add_scalar(
+            tag=tag.lower().replace(" ", "_"),
+            scalar_value=scalar_value,
+            global_step=global_step
+        )
 
     @multi_process_safe
     def add_scalars(self, tag_scalar_dict: dict, global_step: int = None):
@@ -151,7 +168,11 @@ class BaseSGLogger(AbstractSGLogger):
         Instead, scalars are added to tensorboard like in add_scalar and are written in log together.
         """
         for tag, value in tag_scalar_dict.items():
-            self.tensorboard_writer.add_scalar(tag=tag.lower().replace(" ", "_"), scalar_value=value, global_step=global_step)
+            self.tensorboard_writer.add_scalar(
+                tag=tag.lower().replace(" ", "_"),
+                scalar_value=value,
+                global_step=global_step
+            )
 
         self.tensorboard_writer.flush()
 
@@ -159,13 +180,25 @@ class BaseSGLogger(AbstractSGLogger):
         log_line = f"\nEpoch ({global_step}/{self.max_global_steps})  - "
         for tag, value in tag_scalar_dict.items():
             if isinstance(value, torch.Tensor):
-                value = value.item()
-            log_line += f'{tag.replace(" ", "_")}: {value}\t'
+                try:
+                    value = value.item()
+                    log_line += f'{tag.replace(" ", "_")}: {value}\t'
+                except ValueError:
+                    for idx, v in enumerate(value):
+                        log_line += f'{tag.replace(" ", "_") + f"_{idx}"}: {v.item()}\t'
+            else:
+                log_line += f'{tag.replace(" ", "_")}: {value}\t'
 
         self._write_to_log_file([log_line])
 
     @multi_process_safe
-    def add_image(self, tag: str, image: Union[torch.Tensor, np.array, Image.Image], data_format="CHW", global_step: int = None):
+    def add_image(
+            self,
+            tag: str,
+            image: Union[torch.Tensor, np.array, Image.Image],
+            data_format="CHW",
+            global_step: int = None
+    ):
         self.tensorboard_writer.add_image(tag=tag, img_tensor=image, dataformats=data_format, global_step=global_step)
 
     @multi_process_safe
@@ -232,16 +265,27 @@ class BaseSGLogger(AbstractSGLogger):
     @multi_process_safe
     def add_file(self, file_name: str = None):
         if self.remote_storage_available:
-            self.model_checkpoints_data_interface.save_remote_tensorboard_event_files(self.experiment_name, self._local_dir, file_name)
+            self.model_checkpoints_data_interface.save_remote_tensorboard_event_files(
+                self.experiment_name,
+                self._local_dir,
+                file_name
+            )
 
     @multi_process_safe
     def upload(self):
         if self.save_tensorboard_remote:
-            self.model_checkpoints_data_interface.save_remote_tensorboard_event_files(self.experiment_name, self._local_dir)
+            self.model_checkpoints_data_interface.save_remote_tensorboard_event_files(
+                self.experiment_name,
+                self._local_dir
+            )
 
         if self.save_logs_remote:
             log_file_name = self.log_file_path.split("/")[-1]
-            self.model_checkpoints_data_interface.save_remote_checkpoints_file(self.experiment_name, self._local_dir, log_file_name)
+            self.model_checkpoints_data_interface.save_remote_checkpoints_file(
+                self.experiment_name,
+                self._local_dir,
+                log_file_name
+            )
 
     @multi_process_safe
     def flush(self):
@@ -274,7 +318,11 @@ class BaseSGLogger(AbstractSGLogger):
         if "best" in tag:
             logger.info("Checkpoint saved in " + path)
         if self.save_checkpoints_remote:
-            self.model_checkpoints_data_interface.save_remote_checkpoints_file(self.experiment_name, self._local_dir, name)
+            self.model_checkpoints_data_interface.save_remote_checkpoints_file(
+                self.experiment_name,
+                self._local_dir,
+                name
+            )
 
     def add(self, tag: str, obj: Any, global_step: int = None):
         pass

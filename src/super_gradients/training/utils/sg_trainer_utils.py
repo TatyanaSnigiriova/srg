@@ -7,7 +7,7 @@ from multiprocessing import Process
 from pathlib import Path
 from typing import Tuple, Union, Dict, Sequence, Callable
 import random
-
+import numpy as np
 import inspect
 
 from super_gradients.common.abstractions.abstract_logger import get_logger
@@ -210,7 +210,13 @@ def display_epoch_summary(
     """
 
     def _format_to_str(val: float) -> str:
-        return str(round(val, n_digits))
+        '''
+        if isinstance(val, np.ndarray):
+            round_ = np.vectorize(lambda v: round(v, n_digits))
+            return round_(val).tostring() + '\n'
+        else:
+        '''
+        return str(round(val, n_digits)) # + '\n'
 
     def _generate_tree(value_name: str, monitored_value: MonitoredValue) -> Tree:
         """Generate a tree that represents the stats of a given loss/metric."""

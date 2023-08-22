@@ -87,7 +87,7 @@ from super_gradients.training.utils.callbacks import (
 from super_gradients.training.utils import HpmStruct
 from super_gradients.training.utils.hydra_utils import load_experiment_cfg, add_params_to_cfg
 from omegaconf import OmegaConf
-
+from torch.profiler import profile, schedule, record_function, ProfilerActivity
 
 
 class Trainer:
@@ -374,7 +374,6 @@ class Trainer:
         else:
             self.net = core_utils.WrappedModel(self.net)
 
-
     def _train_epoch(self, epoch: int, silent_mode: bool = False) -> tuple:
         """
         train_epoch - A single epoch training procedure
@@ -382,6 +381,7 @@ class Trainer:
             :param epoch:       The current epoch
             :param silent_mode: No verbosity
         """
+
         def print_gpu_memory_utilization(message, silent_mode):
             if not silent_mode:
                 print(message, get_gpu_mem_utilization() / 1e9 if torch.cuda.is_available() else 0)
@@ -469,7 +469,7 @@ class Trainer:
                     outputs[i_output] = outputs[i_output].detach()
                 outputs = tuple(outputs)
                 context.update_context(batch_idx=batch_idx, inputs=inputs, preds=outputs, target=targets,
-                                        loss_log_items=loss_log_items, **additional_batch_items)
+                                       loss_log_items=loss_log_items, **additional_batch_items)
                 del batch_items, inputs, targets, additional_batch_items, outputs
 
                 self.phase_callback_handler(Phase.TRAIN_BATCH_END, context)
@@ -623,7 +623,7 @@ class Trainer:
 
         # ACCUMULATE GRADIENT FOR X BATCHES BEFORE OPTIMIZING
         integrated_batches_num = batch_idx + len(self.train_loader) * epoch + 1
-        #print(integrated_batches_num, self.batch_accumulate)
+        # print(integrated_batches_num, self.batch_accumulate)
 
         if integrated_batches_num % self.batch_accumulate == 0:
             # SCALER IS ENABLED ONLY IF self.training_params.mixed_precision=True
@@ -2125,3 +2125,159 @@ class Trainer:
                 self.metric_to_watch = criterion_name + "/" + self.metric_to_watch
         else:
             self.loss_logging_items_names = [criterion_name]
+
+    def inf_eval(
+            self,
+            model: nn.Module = None,
+            inf_eval_loader: torch.utils.data.DataLoader = None,
+            silent_mode: bool = False,
+            use_ema_net=True,
+            mixed_precision=False,
+    ) -> tuple:
+        self.net = model or self.net
+        epoch = 0
+        # IN CASE TRAINING WAS PERFROMED BEFORE inf_eval- MAKE SURE TO inf_eval THE EMA MODEL (UNLESS SPECIFIED OTHERWISE BY
+        # use_ema_net)
+
+        if use_ema_net and self.ema_model is not None:
+            keep_model = self.net
+            self.net = self.ema_model.ema
+
+        """Run commands that are common to all models"""
+        # SET THE MODEL IN evaluation STATE
+        self.net.eval()
+
+        # IF SPECIFIED IN THE FUNCTION CALL - OVERRIDE THE self ARGUMENTS
+        self.inf_eval_loader = inf_eval_loader or self.inf_eval_loader
+
+        # WHEN inf_evalING WITHOUT A LOSS FUNCTION- CREATE EPOCH HEADERS FOR PRINTS
+
+        if self.inf_eval_loader is None:
+            raise ValueError(
+                "inf_eval dataloader is required to perform inf_eval. Make sure to either pass it through " "inf_eval_loader arg.")
+
+        if self.arch_params is None:
+            self._init_arch_params()
+        self._net_to_device()
+
+        evaluation_type = EvaluationType.VALIDATION
+
+        # THE DISABLE FLAG CONTROLS WHETHER THE PROGRESS BAR IS SILENT OR PRINTS THE LOGS
+        progress_bar_inf_eval_loader = tqdm(self.inf_eval_loader, bar_format="{l_bar}{bar:10}{r_bar}",
+                                            dynamic_ncols=True, disable=silent_mode)
+
+        progress_bar_inf_eval_loader_prof = tqdm(self.inf_eval_loader, bar_format="{l_bar}{bar:10}{r_bar}",
+                                                 dynamic_ncols=True, disable=silent_mode)
+
+        progress_bar_inf_eval_loader_ = tqdm(self.inf_eval_loader, bar_format="{l_bar}{bar:10}{r_bar}",
+                                             dynamic_ncols=True, disable=silent_mode)
+
+        lr_warmup_epochs = self.training_params.lr_warmup_epochs if self.training_params else None
+
+        schedule_obj = schedule(
+            skip_first=30,
+            wait=0,
+            warmup=20,
+            active=1,
+            # repeat=2
+        )
+        os.makedirs(os.path.join(self.checkpoints_dir_path, 'traces'))
+
+        def trace_handler(p):
+            p.export_chrome_trace(
+                os.path.join(os.path.join(self.checkpoints_dir_path, "traces"), str(p.step_num) + ".json")
+            )
+
+        context = PhaseContext(
+            epoch=epoch,
+            device=self.device,
+            lr_warmup_epochs=lr_warmup_epochs,
+            sg_logger=self.sg_logger,
+            context_methods=self._get_context_methods(Phase.VALIDATION_BATCH_END),
+        )
+
+        with torch.no_grad():
+            with profile(
+                    activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+                    schedule=schedule_obj,
+                    on_trace_ready=torch.profiler.tensorboard_trace_handler(
+                        os.path.join(self.checkpoints_dir_path, "traces")),  # trace_handler,
+                    record_shapes=True,
+                    profile_memory=True,
+                    use_cuda=True,
+                    with_stack=True,
+            ) as p:
+                for batch_idx, batch_items in enumerate(progress_bar_inf_eval_loader_prof):
+                    batch_items = core_utils.tensor_container_to_device(batch_items, self.device, non_blocking=True)
+                    inputs, targets, additional_batch_items = sg_trainer_utils.unpack_batch_items(batch_items)
+                    with autocast(enabled=mixed_precision):
+                        output = self.net(inputs)
+
+                    context.update_context(batch_idx=batch_idx, inputs=inputs, preds=output, target=targets,
+                                           **additional_batch_items)
+                    p.step()
+                    # print("a:", torch.cuda.memory_allocated(), torch.cuda.max_memory_allocated())
+                    # print("r:",torch.cuda.memory_reserved(), torch.cuda.max_memory_reserved())
+
+        # INIT LOGGERS
+        starter_inf, ender_inf = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+        timings = []
+
+        with torch.no_grad():
+            for batch_idx, batch_items in enumerate(progress_bar_inf_eval_loader):
+                batch_items = core_utils.tensor_container_to_device(batch_items, self.device, non_blocking=True)
+                inputs, targets, additional_batch_items = sg_trainer_utils.unpack_batch_items(batch_items)
+                starter_inf.record()
+                with autocast(enabled=mixed_precision):
+                    output = self.net(inputs)
+                ender_inf.record()
+                torch.cuda.synchronize()
+                curr_time = starter_inf.elapsed_time(ender_inf)
+                timings.append(curr_time)
+
+                context.update_context(batch_idx=batch_idx, inputs=inputs, preds=output, target=targets,
+                                       **additional_batch_items)
+        pd_timings = pd.Series(data=timings)
+        pd_timings.to_csv(
+            os.path.join(self.checkpoints_dir_path, basename(dirname(self.checkpoints_dir_path)) + 'inf_time.csv'),
+            index=False)
+        print("mean", np.mean(timings))
+        print("std", np.std(timings))
+        del starter_inf, ender_inf
+
+        starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+        timings = []
+
+        with torch.no_grad():
+            starter.record()
+            for batch_idx, batch_items in enumerate(progress_bar_inf_eval_loader_):
+                batch_items = core_utils.tensor_container_to_device(batch_items, self.device, non_blocking=True)
+                inputs, targets, additional_batch_items = sg_trainer_utils.unpack_batch_items(batch_items)
+                with autocast(enabled=mixed_precision):
+                    output = self.net(inputs)
+                ender.record()
+                torch.cuda.synchronize()
+                curr_time = starter.elapsed_time(ender)
+                timings.append(curr_time)
+
+                context.update_context(batch_idx=batch_idx, inputs=inputs, preds=output, target=targets,
+                                       **additional_batch_items)
+                starter.record()
+
+        ender.record()
+        pd_timings = pd.Series(data=timings)
+        pd_timings.to_csv(
+            os.path.join(self.checkpoints_dir_path, basename(dirname(self.checkpoints_dir_path)) + 'full_inf_time.csv'),
+            index=False)
+        print(basename(dirname(dirname(self.checkpoints_dir_path))))
+        print(dirname(self.checkpoints_dir_path))
+        print(dirname(dirname(self.checkpoints_dir_path)))
+
+        print("mean", np.mean(timings))
+        print("std", np.std(timings))
+
+        # SWITCH BACK BETWEEN NETS SO AN ADDITIONAL TRAINING CAN BE DONE AFTER inf_eval
+        if use_ema_net and self.ema_model is not None:
+            self.net = keep_model
+
+        self._first_backward = True

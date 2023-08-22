@@ -374,6 +374,7 @@ class Trainer:
         else:
             self.net = core_utils.WrappedModel(self.net)
 
+
     def _train_epoch(self, epoch: int, silent_mode: bool = False) -> tuple:
         """
         train_epoch - A single epoch training procedure
@@ -381,6 +382,10 @@ class Trainer:
             :param epoch:       The current epoch
             :param silent_mode: No verbosity
         """
+        def print_gpu_memory_utilization(message, silent_mode):
+            if not silent_mode:
+                print(message, get_gpu_mem_utilization() / 1e9 if torch.cuda.is_available() else 0)
+
         # SET THE MODEL IN training STATE
         self.sg_logger.reinit_log_file()
         self.net.train()
@@ -408,47 +413,89 @@ class Trainer:
             context_methods=self._get_context_methods(Phase.TRAIN_BATCH_END),
             ddp_silent_mode=self.ddp_silent_mode,
         )
-
+        torch.cuda.empty_cache()
         for batch_idx, batch_items in enumerate(progress_bar_train_loader):
+            print_gpu_memory_utilization(
+                message="bedore init batch_items gpu_memory_utilization",
+                silent_mode=silent_mode
+            )
+
             batch_items = core_utils.tensor_container_to_device(batch_items, self.device, non_blocking=True)
             inputs, targets, additional_batch_items = sg_trainer_utils.unpack_batch_items(batch_items)
+            # del batch_items
 
             if self.pre_prediction_callback is not None:
                 inputs, targets = self.pre_prediction_callback(inputs, targets, batch_idx)
+            targets = targets.detach()
+
+            print_gpu_memory_utilization(
+                message="after init batch_items gpu_memory_utilization",
+                silent_mode=silent_mode
+            )
+
             # AUTOCAST IS ENABLED ONLY IF self.training_params.mixed_precision - IF enabled=False AUTOCAST HAS NO EFFECT
             with autocast(enabled=self.training_params.mixed_precision):
                 # FORWARD PASS TO GET NETWORK'S PREDICTIONS
                 outputs = self.net(inputs)
+                print_gpu_memory_utilization(
+                    message="after model prediction gpu_memory_utilization",
+                    silent_mode=silent_mode
+                )
+                inputs = inputs.detach().cpu()
 
                 # COMPUTE THE LOSS FOR BACK PROP + EXTRA METRICS COMPUTED DURING THE LOSS FORWARD PASS
-                loss, loss_log_items = self._get_losses(outputs, targets)
+                loss_log_items = None
+                losses = self._get_losses(outputs, targets)
+                # Now loss is generator
+                for loss, loss_log_items, end_marker in losses:
+                    # print(loss_)
+                    # print(loss_log_items)
+                    # print(end_marker)
+                    print_gpu_memory_utilization(
+                        message="after get loss gpu_memory_utilization",
+                        silent_mode=silent_mode
+                    )
+                    # SCALER IS ENABLED ONLY IF self.training_params.mixed_precision=True
+                    self.scaler.scale(loss).backward(retain_graph=not (end_marker))
+                    print_gpu_memory_utilization(
+                        message="after loss.backward() gpu_memory_utilization",
+                        silent_mode=silent_mode
+                    )
 
-            context.update_context(batch_idx=batch_idx, inputs=inputs, preds=outputs, target=targets,
-                                   loss_log_items=loss_log_items, **additional_batch_items)
+            # p.step()
+            with torch.no_grad():
+                outputs = list(outputs)
+                for i_output in range(len(outputs)):
+                    outputs[i_output] = outputs[i_output].detach()
+                outputs = tuple(outputs)
+                context.update_context(batch_idx=batch_idx, inputs=inputs, preds=outputs, target=targets,
+                                        loss_log_items=loss_log_items, **additional_batch_items)
+                del batch_items, inputs, targets, additional_batch_items, outputs
 
-            self.phase_callback_handler(Phase.TRAIN_BATCH_END, context)
+                self.phase_callback_handler(Phase.TRAIN_BATCH_END, context)
 
-            # LOG LR THAT WILL BE USED IN CURRENT EPOCH AND AFTER FIRST WARMUP/LR_SCHEDULER UPDATE BEFORE WEIGHT UPDATE
-            if not self.ddp_silent_mode and batch_idx == 0:
-                self._write_lrs(epoch)
+                # LOG LR THAT WILL BE USED IN CURRENT EPOCH AND AFTER FIRST WARMUP/LR_SCHEDULER UPDATE BEFORE WEIGHT UPDATE
+                if not self.ddp_silent_mode and batch_idx == 0:
+                    self._write_lrs(epoch)
 
-            self._backward_step(loss, epoch, batch_idx, context)
+            self._optimizer_step(epoch, batch_idx, context)
 
-            # COMPUTE THE RUNNING USER METRICS AND LOSS RUNNING ITEMS. RESULT TUPLE IS THEIR CONCATENATION.
-            logging_values = loss_avg_meter.average + get_metrics_results_tuple(self.train_metrics)
-            gpu_memory_utilization = get_gpu_mem_utilization() / 1e9 if torch.cuda.is_available() else 0
+            with torch.no_grad():
+                # COMPUTE THE RUNNING USER METRICS AND LOSS RUNNING ITEMS. RESULT TUPLE IS THEIR CONCATENATION.
+                logging_values = loss_avg_meter.average + get_metrics_results_tuple(self.train_metrics)
+                gpu_memory_utilization = get_gpu_mem_utilization() / 1e9 if torch.cuda.is_available() else 0
 
-            # RENDER METRICS PROGRESS
-            pbar_message_dict = get_train_loop_description_dict(
-                logging_values, self.train_metrics, self.loss_logging_items_names, gpu_mem=gpu_memory_utilization
-            )
+                # RENDER METRICS PROGRESS
+                pbar_message_dict = get_train_loop_description_dict(
+                    logging_values, self.train_metrics, self.loss_logging_items_names, gpu_mem=gpu_memory_utilization
+                )
 
-            progress_bar_train_loader.set_postfix(**pbar_message_dict)
+                progress_bar_train_loader.set_postfix(**pbar_message_dict)
 
-            # TODO: ITERATE BY MAX ITERS
-            # FOR INFINITE SAMPLERS WE MUST BREAK WHEN REACHING LEN ITERATIONS.
-            if self._infinite_train_loader and batch_idx == len(self.train_loader) - 1:
-                break
+                # TODO: ITERATE BY MAX ITERS
+                # FOR INFINITE SAMPLERS WE MUST BREAK WHEN REACHING LEN ITERATIONS.
+                if self._infinite_train_loader and batch_idx == len(self.train_loader) - 1:
+                    break
 
         if not self.ddp_silent_mode:
             self.sg_logger.upload()
@@ -459,31 +506,71 @@ class Trainer:
 
         return logging_values
 
+    def _get_total_loss(self, outputs: torch.Tensor, targets: torch.Tensor):
+        losses = self._get_losses(outputs, targets)
+        # Now loss is generator
+        loss_log_items = None, None
+        for loss_ in losses:
+            _, loss_log_items_, end_marker = loss_
+            if end_marker:
+                loss_log_items = loss_log_items_
+
+        return loss_log_items
+
     def _get_losses(self, outputs: torch.Tensor, targets: torch.Tensor) -> Tuple[torch.Tensor, tuple]:
+        def derrive_logging_titles(loss_logging_items):
+            # ON FIRST BACKWARD, DERRIVE THE LOGGING TITLES.
+            if self.loss_logging_items_names is None or self._first_backward:
+                self._init_loss_logging_names(loss_logging_items)
+                if self.metric_to_watch:
+                    self._init_monitored_items()
+                self._first_backward = False
+
+            if len(loss_logging_items) != len(self.loss_logging_items_names):
+                raise ValueError(
+                    "Loss output length must match loss_logging_items_names. Got "
+                    + str(len(loss_logging_items))
+                    + ", and "
+                    + str(len(self.loss_logging_items_names))
+                )
+
         # GET THE OUTPUT OF THE LOSS FUNCTION
         loss = self.criterion(outputs, targets)
-        if isinstance(loss, tuple):
-            loss, loss_logging_items = loss
-            # IF ITS NOT A TUPLE THE LOGGING ITEMS CONTAIN ONLY THE LOSS FOR BACKPROP (USER DEFINED LOSS RETURNS SCALAR)
+        # Другого варианта, как отправлять маркер конца генератора, я не придумала
+        # Мне нужно установить для всех промежуточных loss.backward(retain_graph=True)
+        # И для последнего loss.backward(retain_graph=False)
+        if not isinstance(loss, typing.collections.abc.Generator):
+            if isinstance(loss, tuple):
+                loss, loss_logging_items = loss
+                if loss_logging_items is not None:
+                    loss_logging_items = loss_logging_items.detach()
+                # IF ITS NOT A TUPLE THE LOGGING ITEMS CONTAIN ONLY THE LOSS FOR BACKPROP (USER DEFINED LOSS RETURNS SCALAR)
+            else:
+                loss_logging_items = loss.unsqueeze(0).detach()
+
+            # RETURN AND THE LOSS LOGGING ITEMS COMPUTED DURING LOSS FORWARD PASS
+            derrive_logging_titles(loss_logging_items)
+            yield (loss, loss_logging_items, True)
         else:
-            loss_logging_items = loss.unsqueeze(0).detach()
+            loss_logging_items = None
+            # loss_logging_items будет возвращен на последней итерации
+            # Предполагается, что и сам loss возвращает его последним
 
-        # ON FIRST BACKWARD, DERRIVE THE LOGGING TITLES.
-        if self.loss_logging_items_names is None or self._first_backward:
-            self._init_loss_logging_names(loss_logging_items)
-            if self.metric_to_watch:
-                self._init_monitored_items()
-            self._first_backward = False
+            for loss_ in loss:
+                assert isinstance(loss_, tuple)
 
-        if len(loss_logging_items) != len(self.loss_logging_items_names):
-            raise ValueError(
-                "Loss output length must match loss_logging_items_names. Got "
-                + str(len(loss_logging_items))
-                + ", and "
-                + str(len(self.loss_logging_items_names))
-            )
-        # RETURN AND THE LOSS LOGGING ITEMS COMPUTED DURING LOSS FORWARD PASS
-        return loss, loss_logging_items
+                loss_, loss_logging_items, end_marker = loss_
+                if end_marker:
+                    if loss_logging_items is not None:
+                        loss_logging_items = loss_logging_items.detach()
+                    else:
+                        loss_logging_items = loss_.unsqueeze(0).detach()
+                # else:
+                # loss_logging_items = None
+                yield (loss_, loss_logging_items, end_marker)
+
+            # Default
+            derrive_logging_titles(loss_logging_items)
 
     def _init_monitored_items(self):
         self.metric_idx_in_results_tuple = (
@@ -519,37 +606,40 @@ class Trainer:
                 load_checkpoint=self.load_checkpoint,
             )
 
-    def _backward_step(self, loss: torch.Tensor, epoch: int, batch_idx: int, context: PhaseContext, *args, **kwargs):
+    def _optimizer_step(self, epoch: int, batch_idx: int, context: PhaseContext, *args, **kwargs):
         """
-        Run backprop on the loss and perform a step
-        :param loss: The value computed by the loss function
+        Perform a single optimization step
         :param optimizer: An object that can perform a gradient step and zeroize model gradient
         :param epoch: number of epoch the training is on
         :param batch_idx: number of iteration inside the current epoch
         :param context: current phase context
         :return:
         """
-        # SCALER IS ENABLED ONLY IF self.training_params.mixed_precision=True
-        self.scaler.scale(loss).backward()
 
         # APPLY GRADIENT CLIPPING IF REQUIRED
         if self.training_params.clip_grad_norm:
+            self.scaler.unscale_(self.optimizer)  # Я дописала по тутору
             torch.nn.utils.clip_grad_norm_(self.net.parameters(), self.training_params.clip_grad_norm)
 
         # ACCUMULATE GRADIENT FOR X BATCHES BEFORE OPTIMIZING
         integrated_batches_num = batch_idx + len(self.train_loader) * epoch + 1
+        #print(integrated_batches_num, self.batch_accumulate)
 
         if integrated_batches_num % self.batch_accumulate == 0:
             # SCALER IS ENABLED ONLY IF self.training_params.mixed_precision=True
             self.scaler.step(self.optimizer)
             self.scaler.update()
 
-            self.optimizer.zero_grad()
+            self.optimizer.zero_grad(set_to_none=True)
             if self.ema:
                 self.ema_model.update(self.net, integrated_batches_num / (len(self.train_loader) * self.max_epochs))
 
             # RUN PHASE CALLBACKS
             self.phase_callback_handler(Phase.TRAIN_BATCH_STEP, context)
+
+            print("after optimizer step gpu_memory_utilization",
+                  get_gpu_mem_utilization() / 1e9 if torch.cuda.is_available() else 0)
+            # torch.cuda.empty_cache()
 
     def _save_checkpoint(self, optimizer=None, epoch: int = None, validation_results_tuple: tuple = None,
                          context: PhaseContext = None):
@@ -1852,12 +1942,13 @@ class Trainer:
             for batch_idx, batch_items in enumerate(progress_bar_data_loader):
                 batch_items = core_utils.tensor_container_to_device(batch_items, self.device, non_blocking=True)
                 inputs, targets, additional_batch_items = sg_trainer_utils.unpack_batch_items(batch_items)
-
+                inputs = inputs.detach()
+                targets = targets.detach()
                 output = self.net(inputs)
 
                 if self.criterion is not None:
                     # STORE THE loss_items ONLY, THE 1ST RETURNED VALUE IS THE loss FOR BACKPROP DURING TRAINING
-                    loss_tuple = self._get_losses(output, targets)[1].cpu()
+                    loss_tuple = self._get_total_loss(output, targets).cpu()
 
                 context.update_context(batch_idx=batch_idx, inputs=inputs, preds=output, target=targets,
                                        loss_log_items=loss_tuple, **additional_batch_items)

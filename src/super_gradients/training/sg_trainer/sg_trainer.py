@@ -1,10 +1,13 @@
 import inspect
 import os
+from os.path import basename, dirname
+import typing
 from copy import deepcopy
 from typing import Union, Tuple, Mapping, Dict
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import torch
 import hydra
 from omegaconf import DictConfig
@@ -85,7 +88,6 @@ from super_gradients.training.utils import HpmStruct
 from super_gradients.training.utils.hydra_utils import load_experiment_cfg, add_params_to_cfg
 from omegaconf import OmegaConf
 
-logger = get_logger(__name__)
 
 
 class Trainer:
@@ -105,7 +107,7 @@ class Trainer:
     """
 
     def __init__(self, experiment_name: str, device: str = None, multi_gpu: Union[MultiGPUMode, str] = MultiGPUMode.OFF,
-                 ckpt_root_dir: str = None):
+                 ckpt_root_dir: str = None, logger=None):
         """
 
         :param experiment_name:                      Used for logging and loading purposes
@@ -123,6 +125,7 @@ class Trainer:
         self.device, self.multi_gpu = None, None
         self.ema = None
         self.ema_model = None
+        self.logger = logger if logger is not None else get_logger(__name__)
         self.sg_logger = None
         self.update_param_groups = None
         self.criterion = None
@@ -248,7 +251,9 @@ class Trainer:
         :param experiment_name:     Name of the experiment to resume
         :param ckpt_root_dir:       Directory including the checkpoints
         """
-        logger.info("Resume training using the checkpoint recipe, ignoring the current recipe")
+        cls.sg_logger.reinit_log_file()
+
+        cls.logger.info("Resume training using the checkpoint recipe, ignoring the current recipe")
         cfg = load_experiment_cfg(experiment_name, ckpt_root_dir)
         add_params_to_cfg(cfg, params=["training_hyperparams.resume=True"])
         return cls.train_from_config(cfg)
@@ -280,14 +285,14 @@ class Trainer:
         )
 
         if cfg.checkpoint_params.checkpoint_path is None:
-            logger.info(
+            cls.logger.info(
                 "checkpoint_params.checkpoint_path was not provided, " "so the recipe will be evaluated using checkpoints_dir/training_hyperparams.ckpt_name"
             )
             checkpoints_dir = Path(
                 get_checkpoints_dir_path(experiment_name=cfg.experiment_name, ckpt_root_dir=cfg.ckpt_root_dir))
             cfg.checkpoint_params.checkpoint_path = str(checkpoints_dir / cfg.training_hyperparams.ckpt_name)
 
-        logger.info(f"Evaluating checkpoint: {cfg.checkpoint_params.checkpoint_path}")
+        cls.logger.info(f"Evaluating checkpoint: {cfg.checkpoint_params.checkpoint_path}")
 
         # BUILD NETWORK
         model = models.get(
@@ -306,7 +311,7 @@ class Trainer:
         valid_metrics_dict = get_metrics_dict(val_results_tuple, trainer.test_metrics, trainer.loss_logging_items_names)
         results = ["Validate Results"]
         results += [f"   - {metric:10}: {value}" for metric, value in valid_metrics_dict.items()]
-        logger.info("\n".join(results))
+        cls.logger.info("\n".join(results))
 
         return model, val_results_tuple
 
@@ -328,7 +333,7 @@ class Trainer:
         :param ckpt_name:           Name of the checkpoint to test ("ckpt_latest.pth", "average_model.pth" or "ckpt_best.pth" for instance)
         :param ckpt_root_dir:       Directory including the checkpoints
         """
-        logger.info("Evaluate checkpoint")
+        cls.logger.info("Evaluate checkpoint")
         cfg = load_experiment_cfg(experiment_name, ckpt_root_dir)
         add_params_to_cfg(cfg, params=["training_hyperparams.resume=True", f"ckpt_name={ckpt_name}"])
         cls.evaluate_from_recipe(cfg)
@@ -359,7 +364,7 @@ class Trainer:
         elif self.multi_gpu == MultiGPUMode.DISTRIBUTED_DATA_PARALLEL:
             if sync_bn:
                 if not self.ddp_silent_mode:
-                    logger.info("DDP - Using Sync Batch Norm... Training time will be affected accordingly")
+                    self.logger.info("DDP - Using Sync Batch Norm... Training time will be affected accordingly")
                 self.net = torch.nn.SyncBatchNorm.convert_sync_batchnorm(self.net).to(self.device)
 
             local_rank = int(self.device.split(":")[1])
@@ -377,6 +382,7 @@ class Trainer:
             :param silent_mode: No verbosity
         """
         # SET THE MODEL IN training STATE
+        self.sg_logger.reinit_log_file()
         self.net.train()
         # THE DISABLE FLAG CONTROLS WHETHER THE PROGRESS BAR IS SILENT OR PRINTS THE LOGS
         progress_bar_train_loader = tqdm(self.train_loader, bar_format="{l_bar}{bar:10}{r_bar}", dynamic_ncols=True,
@@ -481,7 +487,7 @@ class Trainer:
 
     def _init_monitored_items(self):
         self.metric_idx_in_results_tuple = (
-                    self.loss_logging_items_names + get_metrics_titles(self.valid_metrics)).index(self.metric_to_watch)
+                self.loss_logging_items_names + get_metrics_titles(self.valid_metrics)).index(self.metric_to_watch)
         # Instantiate the values to monitor (loss/metric)
         for loss_name in self.loss_logging_items_names:
             self.train_monitored_values[loss_name] = MonitoredValue(name=loss_name, greater_is_better=False)
@@ -594,7 +600,7 @@ class Trainer:
 
             if isinstance(metric, torch.Tensor):
                 metric = metric.item()
-            logger.info("Best checkpoint overriden: validation " + self.metric_to_watch + ": " + str(metric))
+            self.logger.info("Best checkpoint overriden: validation " + self.metric_to_watch + ": " + str(metric))
 
         if self.training_params.average_best_models:
             net_for_averaging = self.ema_model.ema if self.ema else self.net
@@ -976,14 +982,14 @@ class Trainer:
 
         :return:
         """
-        global logger
         if training_params is None:
             training_params = dict()
         self.train_loader = train_loader or self.train_loader
         self.valid_loader = valid_loader or self.valid_loader
         if len(self.train_loader.dataset) % self.train_loader.batch_size != 0 and not self.train_loader.drop_last:
-            logger.warning(
-                "Train dataset size % batch_size != 0 and drop_last=False, this might result in smaller " "last batch.")
+            self.logger.warning(
+                "Train dataset size % batch_size != 0 and drop_last=False, this might result in smaller " "last batch."
+            )
         self._set_dataset_params()
 
         if self.multi_gpu == MultiGPUMode.DISTRIBUTED_DATA_PARALLEL:
@@ -995,7 +1001,7 @@ class Trainer:
                     "This cancels the DDP benefits since it makes each process iterate through the entire dataset"
                 )
             if not isinstance(train_sampler, (DistributedSampler, InfiniteSampler, RepeatAugSampler)):
-                logger.warning(
+                self.logger.warning(
                     "The training sampler you are using might not support DDP. "
                     "If it doesnt, please use one of the following sampler: DistributedSampler, InfiniteSampler, RepeatAugSampler"
                 )
@@ -1043,7 +1049,7 @@ class Trainer:
 
         if self.ema:
             ema_params = self.training_params.ema_params
-            logger.info(f"Using EMA with params {ema_params}")
+            self.logger.info(f"Using EMA with params {ema_params}")
             self.ema_model = self._instantiate_ema_model(**ema_params)
             self.ema_model.updates = self.start_epoch * num_batches // self.batch_accumulate
             if self.load_checkpoint:
@@ -1051,8 +1057,9 @@ class Trainer:
                     self.ema_model.ema.load_state_dict(self.checkpoint["ema_net"])
                 else:
                     self.ema = False
-                    logger.warning(
-                        "[Warning] Checkpoint does not include EMA weights, continuing training without EMA.")
+                    self.logger.warning(
+                        "[Warning] Checkpoint does not include EMA weights, continuing training without EMA."
+                    )
 
         self.run_validation_freq = self.training_params.run_validation_freq
         validation_results_tuple = (0, 0)
@@ -1116,7 +1123,7 @@ class Trainer:
                                                   anchors=self.net.module.arch_params.anchors)
                 dataset_statistics_logger.analyze(self.valid_loader, all_classes=self.classes, title="val-set")
 
-        sg_trainer_utils.log_uncaught_exceptions(logger)
+        sg_trainer_utils.log_uncaught_exceptions(self.logger)
 
         if not self.load_checkpoint or self.load_weights_only:
             # WHEN STARTING TRAINING FROM SCRATCH, DO NOT LOAD OPTIMIZER PARAMS (EVEN IF LOADING BACKBONE)
@@ -1193,11 +1200,11 @@ class Trainer:
         try:
             # HEADERS OF THE TRAINING PROGRESS
             if not silent_mode:
-                logger.info(
+                self.logger.info(
                     f"Started training for {self.max_epochs - self.start_epoch} epochs ({self.start_epoch}/" f"{self.max_epochs - 1})\n")
             for epoch in range(self.start_epoch, self.max_epochs):
                 if context.stop_training:
-                    logger.info("Request to stop training has been received, stopping training")
+                    self.logger.info("Request to stop training has been received, stopping training")
                     break
 
                 # Phase.TRAIN_EPOCH_START
@@ -1270,11 +1277,11 @@ class Trainer:
                 self._validate_final_average_model(cleanup_snapshots_pkl_file=True)
 
         except KeyboardInterrupt:
-            logger.info(
+            self.logger.info(
                 "\n[MODEL TRAINING EXECUTION HAS BEEN INTERRUPTED]... Please wait until SOFT-TERMINATION process "
                 "finishes and saves all of the Model Checkpoints and log files before terminating..."
             )
-            logger.info("For HARD Termination - Stop the process again")
+            self.logger.info("For HARD Termination - Stop the process again")
 
         finally:
             if self.multi_gpu == MultiGPUMode.DISTRIBUTED_DATA_PARALLEL:
@@ -1342,7 +1349,7 @@ class Trainer:
             if self.load_checkpoint:
                 scaler_state_dict = core_utils.get_param(self.checkpoint, "scaler_state_dict")
                 if scaler_state_dict is None:
-                    logger.warning(
+                    self.logger.warning(
                         "Mixed Precision - scaler state_dict not found in loaded model. This may case issues " "with loss scaling")
                 else:
                     self.scaler.load_state_dict(scaler_state_dict)
@@ -1353,7 +1360,7 @@ class Trainer:
         Will be loaded to each of DDP processes
         :param cleanup_pkl_file: a flag for deleting the 10 best snapshots dictionary
         """
-        logger.info("RUNNING ADDITIONAL TEST ON THE AVERAGED MODEL...")
+        self.logger.info("RUNNING ADDITIONAL TEST ON THE AVERAGED MODEL...")
 
         keep_state_dict = deepcopy(self.net.state_dict())
         # SETTING STATE DICT TO THE AVERAGE MODEL FOR EVALUATION
@@ -1428,7 +1435,7 @@ class Trainer:
         self.net.to(self.device)
 
         if self.multi_gpu == MultiGPUMode.DISTRIBUTED_DATA_PARALLEL:
-            logger.warning("Warning: distributed training is not supported in re_build_model()")
+            self.logger.warning("Warning: distributed training is not supported in re_build_model()")
         self.net = torch.nn.DataParallel(self.net,
                                          device_ids=self.device_ids) if self.multi_gpu else core_utils.WrappedModel(
             self.net)
@@ -1480,7 +1487,7 @@ class Trainer:
                     self.multi_gpu = MultiGPUMode.OFF
                     if requested_multi_gpu != MultiGPUMode.AUTO:
                         # if AUTO mode was set - do not log a warning
-                        logger.warning(
+                        self.logger.warning(
                             "\n[WARNING] - Tried running on multiple GPU but only a single GPU is available\n")
                 else:
                     if requested_multi_gpu == MultiGPUMode.AUTO:
@@ -1495,7 +1502,8 @@ class Trainer:
             else:
                 # MULTIPLE GPUS CAN BE ACTIVE ONLY IF A GPU IS AVAILABLE
                 self.multi_gpu = MultiGPUMode.OFF
-                logger.warning("\n[WARNING] - Tried running on multiple GPU but none are available => running on CPU\n")
+                self.logger.warning(
+                    "\n[WARNING] - Tried running on multiple GPU but none are available => running on CPU\n")
 
     def _initialize_ddp(self):
         """
@@ -1511,7 +1519,7 @@ class Trainer:
         if local_rank > 0:
             mute_current_process()
 
-        logger.info("Distributed training starting...")
+        self.logger.info("Distributed training starting...")
         if not torch.distributed.is_initialized():
             backend = "gloo" if os.name == "nt" else "nccl"
             torch.distributed.init_process_group(backend=backend, init_method="env://")
@@ -1523,7 +1531,7 @@ class Trainer:
         self.ddp_silent_mode = local_rank > 0
 
         if torch.distributed.get_rank() == 0:
-            logger.info(f"Training in distributed mode... with {str(torch.distributed.get_world_size())} GPUs")
+            self.logger.info(f"Training in distributed mode... with {str(torch.distributed.get_world_size())} GPUs")
 
     def _switch_device(self, new_device):
         self.device = new_device
@@ -1563,7 +1571,7 @@ class Trainer:
             )
 
             if "ema_net" in self.checkpoint.keys():
-                logger.warning(
+                self.logger.warning(
                     "[WARNING] Main network has been loaded from checkpoint but EMA network exists as "
                     "well. It "
                     " will only be loaded during validation when training with ema=True. "
@@ -1654,7 +1662,7 @@ class Trainer:
             raise RuntimeError("sg_logger can be either an sg_logger name (str) or an instance of AbstractSGLogger")
 
         if not isinstance(self.sg_logger, BaseSGLogger):
-            logger.warning(
+            self.logger.warning(
                 "WARNING! Using a user-defined sg_logger: files will not be automatically written to disk!\n"
                 "Please make sure the provided sg_logger writes to disk or compose your sg_logger to BaseSGLogger"
             )

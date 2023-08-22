@@ -2,12 +2,15 @@ from .conv_bn_act_block import ConvBNAct
 from .conv_bn_relu_block import ConvBNReLU
 from .repvgg_block import RepVGGBlock
 from .se_blocks import SEBlock, EffectiveSEBlock
-from .skip_connections import Residual, SkipConnection, CrossModelSkipConnection, BackboneInternalSkipConnection, HeadInternalSkipConnection
+from .skip_connections import Residual, SkipConnection, CrossModelSkipConnection, BackboneInternalSkipConnection, \
+    HeadInternalSkipConnection
 from super_gradients.common.abstractions.abstract_logger import get_logger
+from .coord_conv import CoordConv
 
 __all__ = [
     "ConvBNAct",
     "ConvBNReLU",
+    "CoordConv",
     "RepVGGBlock",
     "SEBlock",
     "EffectiveSEBlock",
@@ -40,7 +43,6 @@ try:
 except (ImportError, NameError, ModuleNotFoundError) as import_err:
     logger.debug(f"Failed to import pytorch_quantization: {import_err}")
     quant_extensions = None
-
 
 if quant_extensions is not None:
     __all__.extend(quant_extensions)

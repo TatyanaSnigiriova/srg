@@ -13,7 +13,7 @@ from super_gradients.common.decorators.factory_decorator import resolve_param
 from super_gradients.common.factories.base_factory import BaseFactory
 from super_gradients.training.models import SgModule
 from super_gradients.training.utils import get_param, HpmStruct
-from super_gradients.modules import ConvBNReLU
+from super_gradients.modules import ConvBNReLU, CoordConv
 from super_gradients.training.models.segmentation_models.common import SegmentationHead
 
 # default STDC argument as paper.
@@ -55,7 +55,8 @@ class STDCBlock(nn.Module):
             )
         else:
             raise ValueError(
-                f"stdc_downsample mode is not supported: found {stdc_downsample_mode}," f" must be in [avg_pool, dw_conv]")
+                f"stdc_downsample mode is not supported: found {stdc_downsample_mode}," f" must be in [avg_pool, dw_conv]"
+            )
 
         in_channels = out_channels // 2
         mid_channels = in_channels
@@ -195,20 +196,30 @@ class STDCBackbone(AbstractSTDCBackbone):
          `dw_conv` for depthwise-convolution.
         :return: nn.Module
         """
-        if block_type == "conv":
+        if block_type in ["conv", "coord2_conv", "coord3_conv"]:
             block = ConvBNReLU
-            kwargs = {"kernel_size": 3, "padding": 1, "bias": False}
+            conv_kwargs = {"kernel_size": 3, "padding": 1, "bias": False, 'is_transpose_conv': False, }
+
+            if block_type == "conv":
+                conv_kwargs.update({'is_coord_conv': False, 'with_r': False})
+            elif block_type == "coord2_conv":
+                conv_kwargs.update({'is_coord_conv': True, 'with_r': False})
+            else:  # block_type == "coord3_conv":
+                conv_kwargs.update({'is_coord_conv': True, 'with_r': True})
+
         elif block_type == "stdc":
             block = STDCBlock
-            kwargs = {"steps": stdc_steps, "stdc_downsample_mode": stdc_downsample_mode}
+            conv_kwargs = {"steps": stdc_steps, "stdc_downsample_mode": stdc_downsample_mode}
         else:
-            raise ValueError(f"Block type not supported: {block_type}, excepted: `conv` or `stdc`")
+            raise ValueError(
+                f"Block type not supported: {block_type}, excepted: `conv`, `stdc`, `coord2_conv` or `coord3_conv`"
+            )
 
         # first block to apply stride 2.
-        blocks = nn.ModuleList([block(in_channels, out_channels, stride=2, **kwargs)])
+        blocks = nn.ModuleList([block(in_channels, out_channels, stride=2, **conv_kwargs)])
         # build rest of blocks
         for i in range(num_blocks - 1):
-            blocks.append(block(out_channels, out_channels, stride=1, **kwargs))
+            blocks.append(block(out_channels, out_channels, stride=1, **conv_kwargs))
 
         return nn.Sequential(*blocks)
 
@@ -517,7 +528,8 @@ class STDCSegmentationBase(SgModule):
         """
         if use_aux is True and self._use_aux_heads is False:
             raise ValueError(
-                "Cant turn use_aux_heads from False to True, you should initiate the module again with" " `use_aux_heads=True`")
+                "Cant turn use_aux_heads from False to True, you should initiate the module again with" " `use_aux_heads=True`"
+            )
         if not use_aux:
             self._remove_auxiliary_and_detail_heads()
         self.cp.use_aux_heads = use_aux
@@ -690,11 +702,21 @@ class STDCCBackbone(STDCBackbone):
             out_down_ratios: Union[tuple, list] = (32,),
             first_ch_widths_scale_2: int = 5,
             ch_widths_scale_2_step: Union[tuple, list] = [1, 3, 4, 5],
-            stdc_downsample_mode="avg_pool"
+            first_two_blocks_is_coord_conv=False,
+            coord_conv_with_r=False,
+            stdc_downsample_mode="avg_pool",
     ):
+        if first_two_blocks_is_coord_conv:
+            if coord_conv_with_r:
+                block_types = ["coord3_conv", "coord3_conv", "stdc", "stdc", "stdc"]
+            else:
+                block_types = ["coord2_conv", "coord2_conv", "stdc", "stdc", "stdc"]
+        else:
+            block_types = ["conv", "conv", "stdc", "stdc", "stdc"]
+
         super().__init__(
             first_batch_norm=first_batch_norm,
-            block_types=["conv", "conv", "stdc", "stdc", "stdc"],
+            block_types=block_types,
             ch_widths=[2 ** (first_ch_widths_scale_2),
                        2 ** (first_ch_widths_scale_2 + ch_widths_scale_2_step[0]),
                        2 ** (first_ch_widths_scale_2 + ch_widths_scale_2_step[1]),
@@ -764,7 +786,9 @@ class STDCCSeg(CustomSTDCSegmentation):
             out_down_ratios=[8, 16, 32],
             first_ch_widths_scale_2=get_param(arch_params, "first_ch_widths_scale_2", 5),  # Тоже, что STDC2Seg
             ch_widths_scale_2_step=get_param(arch_params, "ch_widths_scale_2_step", [1, 3, 4, 5]),  # Тоже, что STDC2Seg
-            stdc_downsample_mode=get_param(arch_params, "stdc_downsample_mode", "avg_pool")
+            first_two_blocks_is_coord_conv=get_param(arch_params, "first_two_blocks_is_coord_conv", False),
+            coord_conv_with_r=get_param(arch_params, "coord_conv_with_r", False),
+            stdc_downsample_mode=get_param(arch_params, "stdc_downsample_mode", "avg_pool"),
         )
 
         custom_params = {"backbone": backbone, **STDC_SEG_DEFAULT_ARGS}

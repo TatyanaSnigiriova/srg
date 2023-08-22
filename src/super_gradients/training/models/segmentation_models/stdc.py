@@ -657,6 +657,7 @@ class STDC1Backbone(STDCBackbone):
             ch_widths=[32, 64, 256, 512, 1024],
             num_blocks=[1, 1, 2, 2, 2],
             stdc_steps=4,
+            stdc_downsample_mode="avg_pool",
             in_channels=in_channels,
             out_down_ratios=out_down_ratios,
         )
@@ -675,6 +676,33 @@ class STDC2Backbone(STDCBackbone):
             ch_widths=[32, 64, 256, 512, 1024],
             num_blocks=[1, 1, 4, 5, 3],
             stdc_steps=4,
+            stdc_downsample_mode="avg_pool",
+            in_channels=in_channels,
+            out_down_ratios=out_down_ratios,
+        )
+
+
+class STDCCBackbone(STDCBackbone):
+    def __init__(
+            self,
+            in_channels: int = 3,
+            first_batch_norm: bool = False,
+            out_down_ratios: Union[tuple, list] = (32,),
+            first_ch_widths_scale_2: int = 5,
+            ch_widths_scale_2_step: Union[tuple, list] = [1, 3, 4, 5],
+            stdc_downsample_mode="avg_pool"
+    ):
+        super().__init__(
+            first_batch_norm=first_batch_norm,
+            block_types=["conv", "conv", "stdc", "stdc", "stdc"],
+            ch_widths=[2 ** (first_ch_widths_scale_2),
+                       2 ** (first_ch_widths_scale_2 + ch_widths_scale_2_step[0]),
+                       2 ** (first_ch_widths_scale_2 + ch_widths_scale_2_step[1]),
+                       2 ** (first_ch_widths_scale_2 + ch_widths_scale_2_step[2]),
+                       2 ** (first_ch_widths_scale_2 + ch_widths_scale_2_step[3])],
+            num_blocks=[1, 1, 4, 5, 3],
+            stdc_steps=4,
+            stdc_downsample_mode=stdc_downsample_mode,
             in_channels=in_channels,
             out_down_ratios=out_down_ratios,
         )
@@ -721,6 +749,22 @@ class STDC2Seg(CustomSTDCSegmentation):
             in_channels=get_param(arch_params, "in_channels", 3),
             first_batch_norm=get_param(arch_params, "first_batch_norm", False),
             out_down_ratios=[8, 16, 32]
+        )
+
+        custom_params = {"backbone": backbone, **STDC_SEG_DEFAULT_ARGS}
+        arch_params.override(**custom_params)
+        super().__init__(arch_params)
+
+
+class STDCCSeg(CustomSTDCSegmentation):
+    def __init__(self, arch_params: HpmStruct):
+        backbone = STDCCBackbone(
+            in_channels=get_param(arch_params, "in_channels", 3),
+            first_batch_norm=get_param(arch_params, "first_batch_norm", False),
+            out_down_ratios=[8, 16, 32],
+            first_ch_widths_scale_2=get_param(arch_params, "first_ch_widths_scale_2", 5),  # Тоже, что STDC2Seg
+            ch_widths_scale_2_step=get_param(arch_params, "ch_widths_scale_2_step", [1, 3, 4, 5]),  # Тоже, что STDC2Seg
+            stdc_downsample_mode=get_param(arch_params, "stdc_downsample_mode", "avg_pool")
         )
 
         custom_params = {"backbone": backbone, **STDC_SEG_DEFAULT_ARGS}

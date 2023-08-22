@@ -46,8 +46,12 @@ class STDCBlock(nn.Module):
             self.skip_step1 = nn.AvgPool2d(kernel_size=3, stride=2, padding=1)
         elif stdc_downsample_mode == "dw_conv":
             self.skip_step1 = ConvBNReLU(
-                out_channels // 2, out_channels // 2, kernel_size=3, stride=2, padding=1, bias=False,
-                groups=out_channels // 2, use_activation=False
+                out_channels // 2, out_channels // 2,
+                kernel_size=3, stride=2, padding=1,
+                bias=False, groups=out_channels // 2,
+                use_activation=False,
+                is_coord_conv=False, with_r=False,
+                is_transpose_conv=False,
             )
         else:
             raise ValueError(
@@ -108,6 +112,7 @@ class AbstractSTDCBackbone(nn.Module, ABC):
 class STDCBackbone(AbstractSTDCBackbone):
     def __init__(
             self,
+            first_batch_norm: bool,
             block_types: list,
             ch_widths: list,
             num_blocks: list,
@@ -117,6 +122,7 @@ class STDCBackbone(AbstractSTDCBackbone):
             out_down_ratios: Union[tuple, list] = (32,),
     ):
         """
+        :param first_batch_norm: boolean flag - whether to normalize the input data batch.
         :param block_types: list of block type for each stage, supported `conv` for ConvBNRelu with 3x3 kernel.
         :param ch_widths: list of output num of channels for each stage.
         :param num_blocks: list of the number of repeating blocks in each stage.
@@ -138,6 +144,29 @@ class STDCBackbone(AbstractSTDCBackbone):
         self.stages = nn.ModuleDict()
         self.out_stage_keys = []
         down_ratio = 2
+
+        self.first_bn = first_batch_norm
+        if first_batch_norm:
+            eps: float = 1e-5
+            momentum: float = 0.1
+            affine: bool = True
+            track_running_stats: bool = True
+            device = None
+            dtype = None
+
+            self.first_bn_op = nn.Sequential()
+            self.first_bn_op.add_module(
+                "bn",
+                nn.BatchNorm2d(in_channels, eps=eps, momentum=momentum, affine=affine,
+                               track_running_stats=track_running_stats,
+                               device=device, dtype=dtype),
+            )
+            '''
+            ToDo - There will be problems with loading the model if 'first_batch_norm' was not enabled before.
+            It is necessary to provide additional training for this layer with the rest of the network frozen.
+            Perhaps take it out of STDCBackbone.
+            '''
+
         for block_type, width, blocks in zip(block_types, ch_widths, num_blocks):
             block_name = f"block_s{down_ratio}"
             self.stages[block_name] = self._make_stage(
@@ -185,6 +214,8 @@ class STDCBackbone(AbstractSTDCBackbone):
 
     def forward(self, x):
         outputs = []
+        if self.first_bn:
+            x = self.first_bn_op(x)
         for stage_name, stage in self.stages.items():
             x = stage(x)
             if stage_name in self.out_stage_keys:
@@ -614,8 +645,14 @@ class CustomSTDCSegmentation(STDCSegmentationBase):
 
 
 class STDC1Backbone(STDCBackbone):
-    def __init__(self, in_channels: int = 3, out_down_ratios: Union[tuple, list] = (32,)):
+    def __init__(
+            self,
+            in_channels: int = 3,
+            first_batch_norm: bool = False,
+            out_down_ratios: Union[tuple, list] = (32,)
+    ):
         super().__init__(
+            first_batch_norm=first_batch_norm,
             block_types=["conv", "conv", "stdc", "stdc", "stdc"],
             ch_widths=[32, 64, 256, 512, 1024],
             num_blocks=[1, 1, 2, 2, 2],
@@ -626,8 +663,14 @@ class STDC1Backbone(STDCBackbone):
 
 
 class STDC2Backbone(STDCBackbone):
-    def __init__(self, in_channels: int = 3, out_down_ratios: Union[tuple, list] = (32,)):
+    def __init__(
+            self,
+            in_channels: int = 3,
+            first_batch_norm: bool = False,
+            out_down_ratios: Union[tuple, list] = (32,)
+    ):
         super().__init__(
+            first_batch_norm=first_batch_norm,
             block_types=["conv", "conv", "stdc", "stdc", "stdc"],
             ch_widths=[32, 64, 256, 512, 1024],
             num_blocks=[1, 1, 4, 5, 3],
@@ -639,21 +682,33 @@ class STDC2Backbone(STDCBackbone):
 
 class STDC1Classification(STDCClassification):
     def __init__(self, arch_params: HpmStruct):
-        backbone = STDC1Backbone(in_channels=get_param(arch_params, "input_channels", 3), out_down_ratios=(32,))
+        backbone = STDC1Backbone(
+            in_channels=get_param(arch_params, "input_channels", 3),
+            first_batch_norm=get_param(arch_params, "first_batch_norm", False),
+            out_down_ratios=(32,)
+        )
         arch_params.override(**{"backbone": backbone})
         super().__init__(arch_params)
 
 
 class STDC2Classification(STDCClassification):
     def __init__(self, arch_params: HpmStruct):
-        backbone = STDC2Backbone(in_channels=get_param(arch_params, "input_channels", 3), out_down_ratios=(32,))
+        backbone = STDC2Backbone(
+            in_channels=get_param(arch_params, "input_channels", 3),
+            first_batch_norm=get_param(arch_params, "first_batch_norm", False),
+            out_down_ratios=(32,)
+        )
         arch_params.override(**{"backbone": backbone})
         super().__init__(arch_params)
 
 
 class STDC1Seg(CustomSTDCSegmentation):
     def __init__(self, arch_params: HpmStruct):
-        backbone = STDC1Backbone(in_channels=get_param(arch_params, "in_channels", 3), out_down_ratios=[8, 16, 32])
+        backbone = STDC1Backbone(
+            in_channels=get_param(arch_params, "in_channels", 3),
+            first_batch_norm=get_param(arch_params, "first_batch_norm", False),
+            out_down_ratios=[8, 16, 32]
+        )
 
         custom_params = {"backbone": backbone, **STDC_SEG_DEFAULT_ARGS}
         arch_params.override(**custom_params)
@@ -662,7 +717,11 @@ class STDC1Seg(CustomSTDCSegmentation):
 
 class STDC2Seg(CustomSTDCSegmentation):
     def __init__(self, arch_params: HpmStruct):
-        backbone = STDC2Backbone(in_channels=get_param(arch_params, "in_channels", 3), out_down_ratios=[8, 16, 32])
+        backbone = STDC2Backbone(
+            in_channels=get_param(arch_params, "in_channels", 3),
+            first_batch_norm=get_param(arch_params, "first_batch_norm", False),
+            out_down_ratios=[8, 16, 32]
+        )
 
         custom_params = {"backbone": backbone, **STDC_SEG_DEFAULT_ARGS}
         arch_params.override(**custom_params)

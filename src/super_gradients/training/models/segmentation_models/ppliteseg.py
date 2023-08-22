@@ -152,6 +152,183 @@ class PPLiteSegDecoder(nn.Module):
         return x
 
 
+def init_extended_seg_head(
+        seg_head_strategy,
+        in_channels,
+        head_mid_channels,
+        num_classes,
+        dropout,
+        scale_factor,
+        upsample_mode,
+        align_corners
+):
+    if seg_head_strategy == "head_single_upsample":
+        return nn.Sequential(
+            SegmentationHead(
+                in_channels=in_channels,
+                mid_channels=head_mid_channels,
+                num_classes=num_classes,
+                dropout=dropout
+            ),
+            make_upsample_module(
+                scale_factor=scale_factor,
+                upsample_mode=upsample_mode,
+                align_corners=align_corners),
+        )
+    elif seg_head_strategy.find('stepwise') != -1:
+        seg_head = nn.Sequential()
+        assert (seg_head_strategy.find('_tconv') != -1 or seg_head_strategy.find(
+            '_upconv') != -1) and seg_head_strategy.find('head') != -1
+        assert seg_head_strategy.find('_tconv2') != -1 or seg_head_strategy.find(
+            '_tconv3') != -1 or seg_head_strategy.find('_upconv2') != -1 or seg_head_strategy.find('_upconv3') != -1
+        assert seg_head_strategy.find('_dw_') == -1 or seg_head_strategy.find(
+            '_dw_tconv') != -1 or seg_head_strategy.find('_dw_upconv') != -1
+        assert seg_head_strategy.find('_dw_') == -1 or seg_head_strategy.find('_coord') == -1
+        assert seg_head_strategy.find('_coord') == -1 or (
+                seg_head_strategy.find('_coord2_') != -1 or seg_head_strategy.find('_coord3_') != -1
+        )
+        assert 2 ** int(np.log2(scale_factor)) == scale_factor, \
+            "'head_scale_factor' is not a power of two, use 'seg_head_strategy':'head_single_upsample'"
+
+        i_scale = 1
+        kwargs = {
+            "kernel_size": 3 if (
+                    seg_head_strategy.find("_tconv3") != -1 or seg_head_strategy.find("_upconv3") != -1) else 2,
+            "stride": 2 if seg_head_strategy.find("_tconv") != -1 else 1,
+            "padding_mode": "zeros",
+            "padding": 1 if (
+                    seg_head_strategy.find("_tconv3") != -1 or seg_head_strategy.find("_upconv3") != -1) else 0,
+            "output_padding": 1 if seg_head_strategy.find("_tconv3") != -1 else 0,
+            "bias": False,
+            "is_transpose_conv": seg_head_strategy.find("_tconv") != -1,
+            "is_coord_conv": seg_head_strategy.find('_coord') != -1,
+            "with_r": seg_head_strategy.find('_coord3_') != -1,
+        }
+        padding = (1, 0, 1, 0) if seg_head_strategy.find("_upconv2") != -1 else 0
+
+        if seg_head_strategy.find('_tconv') < seg_head_strategy.find('_head'):
+            assert seg_head_strategy.find('_nbn') == -1 and seg_head_strategy.find('_nact') == -1
+            if seg_head_strategy.find('_dw_') != -1:
+                # deep-wise
+                while 2 ** i_scale <= scale_factor:
+                    conv_op = ConvBNReLU(
+                        in_channels=in_channels, out_channels=in_channels,
+                        groups=in_channels, use_normalization=True, use_activation=True, **kwargs
+                        # не рискну убавлять каналы, тк их и без этого всего 64, а у меня 18 классов
+                    )
+                    pad_op = nn.ConstantPad2d(padding, 0)
+
+                    if kwargs["is_transpose_conv"]:
+                        seg_head.append(conv_op)
+                    else:
+                        seg_head.append(
+                            nn.Sequential(
+                                make_upsample_module(
+                                    scale_factor=2,
+                                    upsample_mode=upsample_mode,
+                                    align_corners=align_corners
+                                ),
+                                pad_op,
+                                conv_op
+                            )
+                        )
+
+                    i_scale += 1
+
+                seg_head.append(
+                    SegmentationHead(
+                        in_channels=in_channels,
+                        mid_channels=head_mid_channels,
+                        num_classes=num_classes,
+                        dropout=dropout
+                    )
+                )
+                return seg_head
+            else:
+                max_scale = int(np.log2(in_channels))
+                out_channels = int(1.5 * 2 ** (max_scale - i_scale))
+                while 2 ** i_scale <= scale_factor:
+                    conv_op = ConvBNReLU(
+                        in_channels=in_channels, out_channels=out_channels,
+                        groups=1, use_normalization=True, use_activation=True, **kwargs
+                    )
+                    pad_op = nn.ConstantPad2d(padding, 0)
+
+                    if kwargs["is_transpose_conv"]:
+                        seg_head.append(conv_op)
+                    else:
+                        seg_head.append(
+                            nn.Sequential(
+                                make_upsample_module(
+                                    scale_factor=2,
+                                    upsample_mode=upsample_mode,
+                                    align_corners=align_corners
+                                ),
+                                pad_op,
+                                conv_op
+                            )
+                        )
+                    if i_scale % 2 == 1:
+                        in_channels, out_channels = out_channels, int(2 ** (max_scale - i_scale))
+                    else:
+                        in_channels, out_channels = out_channels, int(1.5 * 2 ** (max_scale - i_scale))
+                    i_scale += 1
+                seg_head.append(
+                    SegmentationHead(
+                        in_channels=in_channels,
+                        mid_channels=in_channels,
+                        num_classes=num_classes,
+                        dropout=dropout
+                    )
+                )
+                return seg_head
+        else:
+            # Здесь уже segHead выдаст нужное кол-во фильтров,
+            # просто будем пытаться увеличить разрешение результирующей карты
+            # '''
+            seg_head.append(
+                nn.Sequential(
+                    ConvBNReLU(in_channels, head_mid_channels, kernel_size=3, padding=1, stride=1, bias=False),
+                    nn.Dropout(dropout),
+                    ConvBNReLU(head_mid_channels, num_classes, kernel_size=1, bias=False)
+                )
+            )
+            in_channels = num_classes
+
+            if seg_head_strategy.find('_dw_tconv') != -1:
+                groups = in_channels
+            else:
+                groups = 1
+            use_normalization, use_activation = seg_head_strategy.find('_nbn') == -1, seg_head_strategy.find(
+                '_nact') == -1
+            while 2 ** i_scale <= scale_factor:
+                if 2 ** i_scale == scale_factor:
+                    use_normalization, use_activation = False, False
+                conv_op = ConvBNReLU(
+                    in_channels=in_channels, out_channels=in_channels,
+                    groups=groups, use_normalization=use_normalization, use_activation=use_activation,
+                    **kwargs
+                )
+                if kwargs["is_transpose_conv"]:
+                    seg_head.append(conv_op)
+                else:
+                    seg_head.append(
+                        nn.Sequential(
+                            make_upsample_module(
+                                scale_factor=2,
+                                upsample_mode=upsample_mode,
+                                align_corners=align_corners
+                            ),
+                            conv_op
+                        )
+                    )
+                i_scale += 1
+            return seg_head
+    else:
+        raise ValueError(
+            f"Segmentation Head block type not supported: {seg_head_strategy}, excepted: `head_stepwise||_coord%X|/|_dw||_tconv%Y` or `stepwise||_coord%X|/|_dw||_tconv%Y_head` where X (is additional coord channels) and Y (is kernel size) in [2, 3]")
+
+
 class PPLiteSegBase(SegmentationModule):
     """
     The PP_LiteSeg implementation based on PaddlePaddle.
@@ -181,6 +358,7 @@ class PPLiteSegBase(SegmentationModule):
             use_aux_heads: bool,
             aux_hidden_channels: List[int],
             aux_scale_factors: List[int],
+            seg_head_strategy: str = "head_single_upsample"
     ):
         """
         :param backbone: Backbone nn.Module should implement the abstract class `AbstractSTDCBackbone`.
@@ -200,6 +378,7 @@ class PPLiteSegBase(SegmentationModule):
         :param aux_hidden_channels: List of hidden channels in auxiliary segmentation heads.
         :param aux_scale_factors: list of uppsample factors for final auxiliary heads logits.
         """
+        # ToDo need to describe the 'seg_head_strategy' param
         super().__init__(use_aux_heads=use_aux_heads)
 
         # Init Encoder
@@ -232,18 +411,17 @@ class PPLiteSegBase(SegmentationModule):
         )
 
         # Init Segmentation classification heads
-        self.seg_head = nn.Sequential(
-            SegmentationHead(
-                in_channels=decoder_channels[-1],
-                mid_channels=head_mid_channels,
-                num_classes=num_classes,
-                dropout=dropout),
-            make_upsample_module(
-                scale_factor=head_scale_factor,
-                upsample_mode=head_upsample_mode,
-                align_corners=align_corners
-            ),
+        self.seg_head = init_extended_seg_head(
+            seg_head_strategy=seg_head_strategy,
+            in_channels=decoder_channels[-1],
+            head_mid_channels=head_mid_channels,
+            num_classes=num_classes,
+            dropout=dropout,
+            scale_factor=head_scale_factor,
+            upsample_mode=head_upsample_mode,
+            align_corners=align_corners,
         )
+
         # Auxiliary heads
         if self.use_aux_heads:
             encoder_out_channels = projection_channels_list
@@ -442,4 +620,5 @@ class PPLiteSegC(PPLiteSegBase):
             use_aux_heads=get_param(arch_params, "use_aux_heads", False),
             aux_hidden_channels=[32, 64, 64],
             aux_scale_factors=[8, 16, 32],
+            seg_head_strategy=get_param(arch_params, "seg_head_strategy", "head_single_upsample")
         )

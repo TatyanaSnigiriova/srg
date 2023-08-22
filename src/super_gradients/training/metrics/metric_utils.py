@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 from torchmetrics import MetricCollection
 from super_gradients.training.utils.utils import AverageMeter
@@ -35,6 +36,12 @@ def get_metrics_titles(metrics_collection: MetricCollection):
             continue
         elif hasattr(metric, "component_names"):
             titles += metric.component_names
+        elif hasattr(metric, "reduction") and (
+                (isinstance(metric.reduction, str) and metric.reduction.lower() == "none")
+                or metric.reduction is None
+            ):
+            titles += ['metric_name'] + [metric_name + f'_{class_idx}' for class_idx in range(metric.num_classes)]
+
         else:
             titles.append(metric_name)
 
@@ -69,10 +76,30 @@ def flatten_metrics_dict(metrics_dict: dict):
         # COLLECT ALL OF THE COMPONENTS IN THE CASE OF COMPOUND METRICS
         elif isinstance(metric_val, dict):
             for sub_metric_name, sub_metric_val in metric_val.items():
-                flattened[sub_metric_name] = sub_metric_val
-        else:
-            flattened[metric_name] = metric_val
+                if isinstance(sub_metric_val, torch.Tensor):
+                    sub_metric_val = sub_metric_val.detach().cpu().numpy()
+                    try:
+                        flattened[sub_metric_name] = np.float32(sub_metric_val.mean().item())
 
+                        for class_idx, class_val in enumerate(sub_metric_val):
+                            flattened[sub_metric_name + f'_{class_idx}'] = np.float32(class_val.item())
+                    except TypeError:
+                        flattened[sub_metric_name] = np.float32(sub_metric_val.item())
+                else:
+                    flattened[sub_metric_name] = sub_metric_val
+        else:
+            if isinstance(metric_val, torch.Tensor):
+                metric_val = metric_val.detach().cpu().numpy()
+                try:
+                    flattened[metric_name] = np.float32(metric_val.mean().item())
+
+                    for class_idx, class_val in enumerate(metric_val):
+                        flattened[metric_name + f'_{class_idx}'] = np.float32(class_val.item())
+
+                except TypeError:
+                    flattened[metric_name] = np.float32(metric_val.item())
+            else:
+                flattened[metric_name] = metric_val
     return flattened
 
 
@@ -101,8 +128,6 @@ def get_train_loop_description_dict(metrics_tuple, metrics_collection, loss_logg
     @return: dict
     """
     log_items.update(get_metrics_dict(metrics_tuple, metrics_collection, loss_logging_item_names))
-    for key, value in log_items.items():
-        if isinstance(value, torch.Tensor):
-            log_items[key] = value.detach().item()
+    # Tensor values have been processed before in flatten_metrics_dict
 
     return log_items

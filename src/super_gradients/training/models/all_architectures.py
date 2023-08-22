@@ -17,11 +17,12 @@ from super_gradients.training.models.detection_models.yolox import YoloX_N, Yolo
 from super_gradients.training.models.segmentation_models.ddrnet import DDRNet23, DDRNet23Slim, AnyBackBoneDDRNet23
 from super_gradients.training.models.segmentation_models.regseg import RegSeg48
 from super_gradients.training.models.segmentation_models.shelfnet import ShelfNet18_LW, ShelfNet34_LW, ShelfNet50, ShelfNet503343, ShelfNet101
-from super_gradients.training.models.segmentation_models.stdc import STDC1Classification, STDC2Classification, STDC1Seg, STDC2Seg, STDCSegmentationBase
+from super_gradients.training.models.segmentation_models.stdc import STDC1Classification, STDC2Classification, STDC1Seg, \
+    STDC2Seg, STDCSegmentationBase, STDCCSeg
 
 from super_gradients.training.models.kd_modules.kd_module import KDModule
 from super_gradients.training.models.classification_models.beit import BeitBasePatch16_224, BeitLargePatch16_224
-from super_gradients.training.models.segmentation_models.ppliteseg import PPLiteSegT, PPLiteSegB
+from super_gradients.training.models.segmentation_models.ppliteseg import PPLiteSegT, PPLiteSegB, PPLiteSegC
 from super_gradients.training.models.segmentation_models.unet import UNetCustom, UnetClassification
 from super_gradients.common.object_names import Models
 
@@ -109,6 +110,9 @@ ARCHITECTURES = {
     Models.STDC2_SEG: STDC2Seg,
     Models.STDC2_SEG50: STDC2Seg,
     Models.STDC2_SEG75: STDC2Seg,
+    Models.STDCC_SEG: STDCCSeg,
+    Models.STDCC_SEG50: STDCCSeg,
+    Models.STDCC_SEG75: STDCCSeg,
     Models.CUSTOM_STDC: STDCSegmentationBase,
     Models.REGSEG48: RegSeg48,
     Models.KD_MODULE: KDModule,
@@ -123,6 +127,9 @@ ARCHITECTURES = {
     Models.PP_LITE_B_SEG: PPLiteSegB,
     Models.PP_LITE_B_SEG50: PPLiteSegB,
     Models.PP_LITE_B_SEG75: PPLiteSegB,
+    Models.PP_LITE_C_SEG: PPLiteSegC,
+    Models.PP_LITE_C_SEG50: PPLiteSegC,
+    Models.PP_LITE_C_SEG75: PPLiteSegC,
     Models.CUSTOM_ANYNET: regnet.CustomAnyNet,
     Models.UNET_CUSTOM: UNetCustom,
     Models.UNET_CUSTOM_CLS: UnetClassification,

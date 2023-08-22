@@ -1,10 +1,12 @@
+import numpy as np
 import torch
 import torch.nn as nn
 from typing import Union, List
 from super_gradients.modules import ConvBNReLU
 from super_gradients.training.utils.module_utils import make_upsample_module
 from super_gradients.common import UpsampleMode
-from super_gradients.training.models.segmentation_models.stdc import AbstractSTDCBackbone, STDC1Backbone, STDC2Backbone
+from super_gradients.training.models.segmentation_models.stdc import AbstractSTDCBackbone, STDC1Backbone, STDC2Backbone, \
+    STDCCBackbone
 from super_gradients.training.models.segmentation_models.common import SegmentationHead
 from super_gradients.training.models.segmentation_models.segmentation_module import SegmentationModule
 from super_gradients.training.utils import HpmStruct, get_param, torch_version_is_greater_or_equal
@@ -42,10 +44,10 @@ class UAFM(nn.Module):
             else ConvBNReLU(skip_channels, in_channels, kernel_size=3, padding=1, bias=False)
         self.up_x = nn.Identity() if up_factor == 1 \
             else make_upsample_module(
-                scale_factor=up_factor,
-                upsample_mode=upsample_mode,
-                align_corners=align_corners
-            )
+            scale_factor=up_factor,
+            upsample_mode=upsample_mode,
+            align_corners=align_corners
+        )
         self.conv_out = ConvBNReLU(in_channels, out_channels, kernel_size=3, padding=1, bias=False)
 
     def forward(self, x, skip):
@@ -396,6 +398,46 @@ class PPLiteSegT(PPLiteSegBase):
             head_scale_factor=8,
             head_upsample_mode="bilinear",
             head_mid_channels=32,
+            dropout=get_param(arch_params, "dropout", 0.0),
+            use_aux_heads=get_param(arch_params, "use_aux_heads", False),
+            aux_hidden_channels=[32, 64, 64],
+            aux_scale_factors=[8, 16, 32],
+        )
+
+
+class PPLiteSegC(PPLiteSegBase):
+    def __init__(self, arch_params: HpmStruct):
+        backbone = STDCCBackbone(
+            in_channels=get_param(arch_params, "in_channels", 3),
+            first_batch_norm=get_param(arch_params, "first_batch_norm", False),
+            out_down_ratios=[8, 16, 32],
+            first_ch_widths_scale_2=get_param(arch_params, "first_ch_widths_scale_2", 5),  # Тоже, что STDC2Seg
+            ch_widths_scale_2_step=get_param(arch_params, "ch_widths_scale_2_step", [1, 3, 4, 5]),  # Тоже, что STDC2Seg
+            first_two_blocks_is_coord_conv=get_param(arch_params, "first_two_blocks_is_coord_conv", False),
+            coord_conv_with_r=get_param(arch_params, "coord_conv_with_r", False),
+            stdc_downsample_mode=get_param(arch_params, "stdc_downsample_mode", "avg_pool")
+        )
+        '''
+        2 ** first_ch_widths_scale_2 ->
+        2 ** (first_ch_widths_scale_2 + ch_widths_scale_2_step[0]) -> 
+        ... ->
+        2 ** (first_ch_widths_scale_2 + ch_widths_scale_2_step[3]) 
+        '''
+        super().__init__(
+            num_classes=get_param(arch_params, "num_classes"),
+            backbone=backbone,
+            projection_channels_list=[96, 128, 128],
+            sppm_inter_channels=128,
+            sppm_out_channels=128,
+            sppm_pool_sizes=[1, 2, 4],
+            sppm_upsample_mode="bilinear",
+            align_corners=False,
+            decoder_up_factors=[1, 2, 2],
+            decoder_channels=[128, 96, 64],
+            decoder_upsample_mode="bilinear",
+            head_scale_factor=8,
+            head_upsample_mode="bilinear",
+            head_mid_channels=64,
             dropout=get_param(arch_params, "dropout", 0.0),
             use_aux_heads=get_param(arch_params, "use_aux_heads", False),
             aux_hidden_channels=[32, 64, 64],

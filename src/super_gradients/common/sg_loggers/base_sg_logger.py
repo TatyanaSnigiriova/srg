@@ -123,8 +123,7 @@ class BaseSGLogger(AbstractSGLogger):
             os.makedirs(self._local_dir)
     @multi_process_safe
     def reinit_log_file(self):
-        AutoLoggerConfig.setup_logging(filename=self.log_full_file_path, copy_already_logged_messages=True)
-        ConsoleSink.set_location(filename=self.console_sink_path)
+        pass
 
     @multi_process_safe
     def _init_log_file(self):
@@ -134,6 +133,8 @@ class BaseSGLogger(AbstractSGLogger):
         self.log_full_file_path = f"{self._local_dir}/sg_logs_{time_string}.txt"
         self.console_sink_path = f"{self._local_dir}/console_{time_string}.txt"
 
+        AutoLoggerConfig.setup_logging(filename=self.log_full_file_path, copy_already_logged_messages=True)
+        ConsoleSink.set_location(filename=self.console_sink_path)
 
     @multi_process_safe
     def _write_to_log_file(self, lines: list):

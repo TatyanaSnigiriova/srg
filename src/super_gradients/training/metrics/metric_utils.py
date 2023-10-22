@@ -24,7 +24,7 @@ def get_logging_values(loss_loggings: AverageMeter, metrics: MetricCollection, c
     return logging_vals
 
 
-def get_metrics_titles(metrics_collection: MetricCollection):
+def get_metrics_titles(metrics_collection: MetricCollection, experiment_name=''):
     """
 
     @param metrics_collection: MetricCollection object for running user specified metrics
@@ -35,15 +35,19 @@ def get_metrics_titles(metrics_collection: MetricCollection):
         if metric_name == "additional_items":
             continue
         elif hasattr(metric, "component_names"):
-            titles += metric.component_names
+            titles += [f'{experiment_name}__{component}' for component in metric.component_names] if experiment_name \
+                else metric.component_names
         elif hasattr(metric, "reduction") and (
                 (isinstance(metric.reduction, str) and metric.reduction.lower() == "none")
                 or metric.reduction is None
             ):
-            titles += ['metric_name'] + [metric_name + f'_{class_idx}' for class_idx in range(metric.num_classes)]
+            titles += [f'{experiment_name}__{metric_name}'] +\
+                    [f'{experiment_name}__{metric_name}_{class_idx}' for class_idx in range(metric.num_classes)]\
+                if experiment_name else [f'{metric_name}'] +\
+                    [f'{metric_name}_{class_idx}' for class_idx in range(metric.num_classes)]
 
         else:
-            titles.append(metric_name)
+            titles.append(f'{experiment_name}__{metric_name}' if experiment_name else metric_name)
 
     return titles
 
@@ -103,7 +107,7 @@ def flatten_metrics_dict(metrics_dict: dict):
     return flattened
 
 
-def get_metrics_dict(metrics_tuple, metrics_collection, loss_logging_item_names):
+def get_metrics_dict(metrics_tuple, metrics_collection, loss_logging_item_names, experiment_name=''):
     """
     Returns a dictionary with the epoch results as values and their names as keys.
     @param metrics_tuple: the result tuple
@@ -111,12 +115,13 @@ def get_metrics_dict(metrics_tuple, metrics_collection, loss_logging_item_names)
     @param loss_logging_item_names: loss component's names.
     @return: dict
     """
-    keys = loss_logging_item_names + get_metrics_titles(metrics_collection)
+    keys = loss_logging_item_names + get_metrics_titles(metrics_collection, experiment_name)
     metrics_dict = dict(zip(keys, list(metrics_tuple)))
     return metrics_dict
 
 
-def get_train_loop_description_dict(metrics_tuple, metrics_collection, loss_logging_item_names, **log_items):
+def get_train_loop_description_dict(metrics_tuple, metrics_collection, loss_logging_item_names, experiment_name='',
+                                    **log_items):
     """
     Returns a dictionary with the epoch's logging items as values and their names as keys, with the purpose of
      passing it as a description to tqdm's progress bar.
@@ -127,7 +132,7 @@ def get_train_loop_description_dict(metrics_tuple, metrics_collection, loss_logg
     @param log_items additional logging items to be rendered.
     @return: dict
     """
-    log_items.update(get_metrics_dict(metrics_tuple, metrics_collection, loss_logging_item_names))
+    log_items.update(get_metrics_dict(metrics_tuple, metrics_collection, loss_logging_item_names, experiment_name))
     # Tensor values have been processed before in flatten_metrics_dict
 
     return log_items

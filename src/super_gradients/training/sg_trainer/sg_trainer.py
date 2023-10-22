@@ -107,7 +107,7 @@ class Trainer:
     """
 
     def __init__(self, experiment_name: str, device: str = None, multi_gpu: Union[MultiGPUMode, str] = MultiGPUMode.OFF,
-                 ckpt_root_dir: str = None, logger=None):
+                 ckpt_root_dir: str = None, logger=None):  # net_to_none = False
         """
 
         :param experiment_name:                      Used for logging and loading purposes
@@ -121,7 +121,8 @@ class Trainer:
 
         """
         # SET THE EMPTY PROPERTIES
-        self.net, self.architecture, self.arch_params, self.dataset_interface = None, None, None, None
+        self.architecture, self.arch_params, self.dataset_interface = None, None, None
+        # self.net = None
         self.device, self.multi_gpu = None, None
         self.ema = None
         self.ema_model = None
@@ -251,7 +252,7 @@ class Trainer:
         :param experiment_name:     Name of the experiment to resume
         :param ckpt_root_dir:       Directory including the checkpoints
         """
-        cls.sg_logger.reinit_log_file()
+        # cls.sg_logger.reinit_log_file()
 
         cls.logger.info("Resume training using the checkpoint recipe, ignoring the current recipe")
         cfg = load_experiment_cfg(experiment_name, ckpt_root_dir)
@@ -387,7 +388,7 @@ class Trainer:
                 print(message, get_gpu_mem_utilization() / 1e9 if torch.cuda.is_available() else 0)
 
         # SET THE MODEL IN training STATE
-        self.sg_logger.reinit_log_file()
+        # self.sg_logger.reinit_log_file()
         self.net.train()
         # THE DISABLE FLAG CONTROLS WHETHER THE PROGRESS BAR IS SILENT OR PRINTS THE LOGS
         progress_bar_train_loader = tqdm(self.train_loader, bar_format="{l_bar}{bar:10}{r_bar}", dynamic_ncols=True,
@@ -415,32 +416,41 @@ class Trainer:
         )
         torch.cuda.empty_cache()
         for batch_idx, batch_items in enumerate(progress_bar_train_loader):
+            '''
             print_gpu_memory_utilization(
                 message="bedore init batch_items gpu_memory_utilization",
                 silent_mode=silent_mode
             )
+            '''
 
             batch_items = core_utils.tensor_container_to_device(batch_items, self.device, non_blocking=True)
             inputs, targets, additional_batch_items = sg_trainer_utils.unpack_batch_items(batch_items)
+            if inputs.shape[0] < 2:
+                continue
+
             # del batch_items
 
             if self.pre_prediction_callback is not None:
                 inputs, targets = self.pre_prediction_callback(inputs, targets, batch_idx)
             targets = targets.detach()
 
+            '''
             print_gpu_memory_utilization(
                 message="after init batch_items gpu_memory_utilization",
                 silent_mode=silent_mode
             )
+            '''
 
             # AUTOCAST IS ENABLED ONLY IF self.training_params.mixed_precision - IF enabled=False AUTOCAST HAS NO EFFECT
             with autocast(enabled=self.training_params.mixed_precision):
                 # FORWARD PASS TO GET NETWORK'S PREDICTIONS
                 outputs = self.net(inputs)
+                '''
                 print_gpu_memory_utilization(
                     message="after model prediction gpu_memory_utilization",
                     silent_mode=silent_mode
                 )
+                '''
                 inputs = inputs.detach().cpu()
 
                 # COMPUTE THE LOSS FOR BACK PROP + EXTRA METRICS COMPUTED DURING THE LOSS FORWARD PASS
@@ -451,16 +461,20 @@ class Trainer:
                     # print(loss_)
                     # print(loss_log_items)
                     # print(end_marker)
+                    '''
                     print_gpu_memory_utilization(
                         message="after get loss gpu_memory_utilization",
                         silent_mode=silent_mode
                     )
+                    '''
                     # SCALER IS ENABLED ONLY IF self.training_params.mixed_precision=True
                     self.scaler.scale(loss).backward(retain_graph=not (end_marker))
+                    '''
                     print_gpu_memory_utilization(
                         message="after loss.backward() gpu_memory_utilization",
                         silent_mode=silent_mode
                     )
+                    '''
 
             # p.step()
             with torch.no_grad():
@@ -478,6 +492,7 @@ class Trainer:
                 if not self.ddp_silent_mode and batch_idx == 0:
                     self._write_lrs(epoch)
 
+            #if len(inputs) > 1:
             self._optimizer_step(epoch, batch_idx, context)
 
             with torch.no_grad():
@@ -517,13 +532,14 @@ class Trainer:
 
         return loss_log_items
 
-    def _get_losses(self, outputs: torch.Tensor, targets: torch.Tensor) -> Tuple[torch.Tensor, tuple]:
+    def _get_losses(self, outputs: torch.Tensor, targets: torch.Tensor, experiment_name='') -> Tuple[
+        torch.Tensor, tuple]:
         def derrive_logging_titles(loss_logging_items):
             # ON FIRST BACKWARD, DERRIVE THE LOGGING TITLES.
             if self.loss_logging_items_names is None or self._first_backward:
-                self._init_loss_logging_names(loss_logging_items)
+                self._init_loss_logging_names(loss_logging_items, experiment_name=experiment_name)
                 if self.metric_to_watch:
-                    self._init_monitored_items()
+                    self._init_monitored_items(experiment_name=experiment_name)
                 self._first_backward = False
 
             if len(loss_logging_items) != len(self.loss_logging_items_names):
@@ -572,28 +588,33 @@ class Trainer:
             # Default
             derrive_logging_titles(loss_logging_items)
 
-    def _init_monitored_items(self):
+    def _init_monitored_items(self, experiment_name=''):
         self.metric_idx_in_results_tuple = (
-                self.loss_logging_items_names + get_metrics_titles(self.valid_metrics)).index(self.metric_to_watch)
+                self.loss_logging_items_names + get_metrics_titles(self.valid_metrics,
+                                                                   experiment_name=experiment_name)).index(
+            experiment_name + '__' + self.metric_to_watch if experiment_name else self.metric_to_watch
+        )
         # Instantiate the values to monitor (loss/metric)
         for loss_name in self.loss_logging_items_names:
             self.train_monitored_values[loss_name] = MonitoredValue(name=loss_name, greater_is_better=False)
             self.valid_monitored_values[loss_name] = MonitoredValue(name=loss_name, greater_is_better=False)
 
-        for metric_name in get_metrics_titles(self.train_metrics):
+        for metric_name in get_metrics_titles(self.train_metrics, experiment_name=experiment_name):
             self.train_monitored_values[metric_name] = MonitoredValue(name=metric_name,
                                                                       greater_is_better=self.greater_train_metrics_is_better.get(
                                                                           metric_name))
 
-        for metric_name in get_metrics_titles(self.valid_metrics):
+        for metric_name in get_metrics_titles(self.valid_metrics, experiment_name=experiment_name):
             self.valid_monitored_values[metric_name] = MonitoredValue(name=metric_name,
                                                                       greater_is_better=self.greater_valid_metrics_is_better.get(
                                                                           metric_name))
 
         self.results_titles = ["Train_" + t for t in
-                               self.loss_logging_items_names + get_metrics_titles(self.train_metrics)] + [
+                               self.loss_logging_items_names + get_metrics_titles(self.train_metrics,
+                                                                                  experiment_name=experiment_name)] + [
                                   "Valid_" + t for t in
-                                  self.loss_logging_items_names + get_metrics_titles(self.valid_metrics)
+                                  self.loss_logging_items_names + get_metrics_titles(self.valid_metrics,
+                                                                                     experiment_name=experiment_name)
                               ]
 
         if self.training_params.average_best_models:
@@ -601,7 +622,7 @@ class Trainer:
                 self.checkpoints_dir_path,
                 greater_is_better=self.greater_metric_to_watch_is_better,
                 source_ckpt_folder_name=self.source_ckpt_folder_name,
-                metric_to_watch=self.metric_to_watch,
+                metric_to_watch=experiment_name + '__' + self.metric_to_watch if experiment_name else self.metric_to_watch,
                 metric_idx=self.metric_idx_in_results_tuple,
                 load_checkpoint=self.load_checkpoint,
             )
@@ -637,8 +658,10 @@ class Trainer:
             # RUN PHASE CALLBACKS
             self.phase_callback_handler(Phase.TRAIN_BATCH_STEP, context)
 
+            '''
             print("after optimizer step gpu_memory_utilization",
                   get_gpu_mem_utilization() / 1e9 if torch.cuda.is_available() else 0)
+            '''
             # torch.cuda.empty_cache()
 
     def _save_checkpoint(self, optimizer=None, epoch: int = None, validation_results_tuple: tuple = None,
@@ -1899,6 +1922,7 @@ class Trainer:
             epoch: int = None,
             silent_mode: bool = False,
             metrics_progress_verbose: bool = False,
+            experiment_name='',
     ):
         """
         Evaluates the model on given dataloader and metrics.
@@ -1964,7 +1988,8 @@ class Trainer:
                     # COMPUTE THE RUNNING USER METRICS AND LOSS RUNNING ITEMS. RESULT TUPLE IS THEIR CONCATENATION.
                     logging_values = get_logging_values(loss_avg_meter, metrics, self.criterion)
                     pbar_message_dict = get_train_loop_description_dict(logging_values, metrics,
-                                                                        self.loss_logging_items_names)
+                                                                        self.loss_logging_items_names,
+                                                                        experiment_name=experiment_name)
 
                     progress_bar_data_loader.set_postfix(**pbar_message_dict)
 
@@ -1972,7 +1997,8 @@ class Trainer:
         if not metrics_progress_verbose:
             # COMPUTE THE RUNNING USER METRICS AND LOSS RUNNING ITEMS. RESULT TUPLE IS THEIR CONCATENATION.
             logging_values = get_logging_values(loss_avg_meter, metrics, self.criterion)
-            pbar_message_dict = get_train_loop_description_dict(logging_values, metrics, self.loss_logging_items_names)
+            pbar_message_dict = get_train_loop_description_dict(logging_values, metrics, self.loss_logging_items_names,
+                                                                experiment_name=experiment_name)
 
             progress_bar_data_loader.set_postfix(**pbar_message_dict)
 
@@ -1984,7 +2010,8 @@ class Trainer:
         if self.multi_gpu == MultiGPUMode.DISTRIBUTED_DATA_PARALLEL:
             logging_values = reduce_results_tuple_for_ddp(logging_values, next(self.net.parameters()).device)
 
-        pbar_message_dict = get_train_loop_description_dict(logging_values, metrics, self.loss_logging_items_names)
+        pbar_message_dict = get_train_loop_description_dict(logging_values, metrics, self.loss_logging_items_names,
+                                                            experiment_name=experiment_name)
 
         self.valid_monitored_values = sg_trainer_utils.update_monitored_values_dict(
             monitored_values_dict=self.valid_monitored_values, new_values_dict=pbar_message_dict
@@ -2110,8 +2137,9 @@ class Trainer:
 
         return context_methods
 
-    def _init_loss_logging_names(self, loss_logging_items):
-        criterion_name = self.criterion.__class__.__name__
+    def _init_loss_logging_names(self, loss_logging_items, experiment_name=''):
+        criterion_name = experiment_name + '__' + self.criterion.__class__.__name__ if experiment_name else \
+            self.criterion.__class__.__name__
         component_names = None
         if hasattr(self.criterion, "component_names"):
             component_names = self.criterion.component_names

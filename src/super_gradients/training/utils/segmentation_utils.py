@@ -29,8 +29,6 @@ def to_one_hot(target: torch.Tensor, num_classes: int, ignore_index: int = None)
         result.
     :return: one hot tensor with shape [N, num_classes, H, W]
     """
-    num_classes = num_classes if ignore_index is None else num_classes + 1
-
     one_hot = F.one_hot(target, num_classes).permute((0, 3, 1, 2))
 
     if ignore_index is not None:

@@ -92,7 +92,7 @@ def instantiate_model(
     arch_params = core_utils.HpmStruct(**arch_params)
 
     architecture_cls, arch_params, pretrained_weights_path, is_remote = get_architecture(model_name, arch_params, download_required_code)
-
+    print(f"pretrained_weights:\t {pretrained_weights}\nis_remote:\t{is_remote}")
     if not issubclass(architecture_cls, SgModule):
         net = architecture_cls(**arch_params.to_dict(include_schema=False))
     else:

@@ -272,7 +272,7 @@ def _yolox_ckpt_solver(ckpt_key, ckpt_val, model_key, model_val):
 
 
 def load_pretrained_weights(model: torch.nn.Module, architecture: str, pretrained_weights: str):
-
+    print("Loading...")
     """
     Loads pretrained weights from the MODEL_URLS dictionary to model
     @param architecture: name of the model's architecture
@@ -312,6 +312,6 @@ def load_pretrained_weights_local(model: torch.nn.Module, architecture: str, pre
     """
 
     map_location = torch.device("cpu")
-
+    print("Local loading...")
     pretrained_state_dict = torch.load(pretrained_weights, map_location=map_location)
     _load_weights(architecture, model, pretrained_state_dict)
